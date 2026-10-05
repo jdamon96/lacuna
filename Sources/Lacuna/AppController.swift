@@ -19,6 +19,7 @@ final class AppController: NSObject, NSApplicationDelegate {
     private let keyboard = ChoiceKeyboard()
     private let panel = FloatingPanel()
     private let highlight = BraceHighlight()
+    private let updater = AppUpdater()
     private var statusItem: NSStatusItem!
     private var settingsWindow: NSWindow?
     private var playgroundWindow: NSWindow?
@@ -40,6 +41,8 @@ final class AppController: NSObject, NSApplicationDelegate {
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
+        updater.willShowUI = { [weak self] in self?.dismiss(); self?.highlight.hide() }
+        updater.start()
         setupMainMenu()
         setupMenu()
         shortcut.onPress = { [weak self] in self?.invokeShortcut() }
@@ -86,6 +89,8 @@ final class AppController: NSObject, NSApplicationDelegate {
         appMenu.addItem(withTitle: "About Lacuna", action: #selector(NSApplication.orderFrontStandardAboutPanel(_:)), keyEquivalent: "")
         let settings = appMenu.addItem(withTitle: "Settings…", action: #selector(showSettings), keyEquivalent: ",")
         settings.target = self
+        appMenu.addItem(updater.makeMenuItem())
+        appMenu.addItem(updater.makeAutomaticChecksMenuItem())
         appMenu.addItem(.separator())
         let fill = appMenu.addItem(withTitle: "Fill template", action: #selector(trigger), keyEquivalent: "")
         fill.target = self
@@ -123,6 +128,8 @@ final class AppController: NSObject, NSApplicationDelegate {
         settings.target = self; menu.addItem(settings)
         let playground = NSMenuItem(title: "Try Lacuna…", action: #selector(showPlayground), keyEquivalent: "")
         playground.target = self; menu.addItem(playground)
+        menu.addItem(updater.makeMenuItem())
+        menu.addItem(updater.makeAutomaticChecksMenuItem())
         menu.addItem(.separator())
         let quit = NSMenuItem(title: "Quit Lacuna", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
         menu.addItem(quit); statusItem.menu = menu

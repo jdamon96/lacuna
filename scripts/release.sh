@@ -3,15 +3,19 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
-VERSION="${VERSION:-0.2.2}"
-BUILD_NUMBER="${BUILD_NUMBER:-4}"
+VERSION="${VERSION:-0.3.0}"
+BUILD_NUMBER="${BUILD_NUMBER:-5}"
+SPARKLE_ACCOUNT="${SPARKLE_ACCOUNT:-com.jdamon.lacuna.updates}"
+RELEASE_REPOSITORY="${RELEASE_REPOSITORY:-jdamon96/lacuna}"
 
 usage() {
     cat <<'USAGE'
-Usage: scripts/release.sh [--version 0.2.2]
+Usage: scripts/release.sh [--version 0.3.0]
 
 Build a universal app, ZIP, and DMG in dist/ without publishing them. Requires Xcode.
-Environment: VERSION (default: 0.2.2), BUILD_NUMBER (default: 4).
+Environment: VERSION (default: 0.3.0), BUILD_NUMBER (default: 5).
+Sparkle: SPARKLE_ACCOUNT (Keychain account; default: com.jdamon.lacuna.updates),
+RELEASE_NOTES_FILE (optional plain-text notes), RELEASE_REPOSITORY (owner/repo).
 Set SIGNING_IDENTITY to a Developer ID Application identity to sign.
 Also set NOTARY_PROFILE to an existing notarytool Keychain profile to notarize.
 Without these, output is ad-hoc signed and is not notarized by Apple.
@@ -35,6 +39,11 @@ fi
 
 BUILD_NUMBER="$BUILD_NUMBER" "$ROOT/scripts/build.sh" --universal --version "$VERSION"
 APP="$ROOT/dist/Lacuna.app"
+SPARKLE_TOOLS="$ROOT/.build/artifacts/sparkle/Sparkle/bin"
+PUBLIC_KEY="$("$SPARKLE_TOOLS/generate_keys" --account "$SPARKLE_ACCOUNT" -p)"
+EXPECTED_KEY="$(/usr/libexec/PlistBuddy -c 'Print :SUPublicEDKey' "$APP/Contents/Info.plist")"
+[[ "$PUBLIC_KEY" == "$EXPECTED_KEY" ]] || { echo "The Sparkle signing key does not match this app's verification key." >&2; exit 1; }
+[[ "$RELEASE_REPOSITORY" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]] || { echo "RELEASE_REPOSITORY must be owner/repo." >&2; exit 1; }
 STEM="$ROOT/dist/Lacuna-$VERSION-universal"
 STAGING="$(mktemp -d "$ROOT/dist/.lacuna-release.XXXXXX")"
 trap 'rm -rf "$STAGING"' EXIT
@@ -65,6 +74,28 @@ else
     echo "Created release archives. They have not been notarized by Apple."
 fi
 
+# Sign the final archive and metadata, after any notarization or stapling.
+# This never exports the private key, which remains in the macOS Keychain.
+UPDATE_SIGNATURE="$("$SPARKLE_TOOLS/sign_update" --account "$SPARKLE_ACCOUNT" -p "$STEM.zip")"
+"$SPARKLE_TOOLS/sign_update" --account "$SPARKLE_ACCOUNT" --verify "$STEM.zip" "$UPDATE_SIGNATURE"
+APPCAST="$STAGING/appcast.xml"
+if [[ -f "$ROOT/appcast.xml" ]]; then
+    "$SPARKLE_TOOLS/sign_update" --account "$SPARKLE_ACCOUNT" --verify "$ROOT/appcast.xml"
+    cp "$ROOT/appcast.xml" "$APPCAST"
+fi
+NOTES="Lacuna $VERSION"
+if [[ -n "${RELEASE_NOTES_FILE:-}" ]]; then
+    NOTES="$(cat "$RELEASE_NOTES_FILE")"
+fi
+python3 "$ROOT/scripts/update-appcast.py" --feed "$APPCAST" \
+    --version "$VERSION" --build "$BUILD_NUMBER" \
+    --url "https://github.com/$RELEASE_REPOSITORY/releases/download/v$VERSION/Lacuna-$VERSION-universal.zip" \
+    --length "$(stat -f%z "$STEM.zip")" --signature "$UPDATE_SIGNATURE" \
+    --minimum-system-version 13.0.0 --release-notes "$NOTES"
+"$SPARKLE_TOOLS/sign_update" --account "$SPARKLE_ACCOUNT" "$APPCAST"
+"$SPARKLE_TOOLS/sign_update" --account "$SPARKLE_ACCOUNT" --verify "$APPCAST"
+cp "$APPCAST" "$ROOT/dist/appcast.xml"
+
 (
     cd "$ROOT/dist"
     shasum -a 256 "Lacuna-$VERSION-universal.zip" "Lacuna-$VERSION-universal.dmg" > "Lacuna-$VERSION-universal.sha256"
@@ -72,3 +103,5 @@ fi
 echo "$STEM.zip"
 echo "$STEM.dmg"
 echo "$STEM.sha256"
+echo "$ROOT/dist/appcast.xml"
+echo "Publish the release assets before copying dist/appcast.xml to appcast.xml and pushing the feed."

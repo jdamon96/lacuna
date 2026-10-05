@@ -12,6 +12,8 @@ Download the DMG or ZIP from [GitHub Releases](https://github.com/jdamon96/lacun
 
 Grant **Accessibility** access when prompted, then open Lacuna’s menu bar settings. Choose your provider, enter your API key, and select a model from the dropdown. **Refresh** loads the available OpenAI or Anthropic models using your key. You can also enter a model ID manually, including for custom servers. Click **Save** when ready.
 
+From version 0.3.0, choose **Check for Updates…** in Lacuna’s menu to download, install, and relaunch in place. **Check for updates automatically** enables background checks; automatic checks and installation are opt-in. Updates preserve your settings and Keychain entries. Versions 0.2.x need one manual installation to get the updater.
+
 ## Use
 
 1. Type something like `Let’s meet {a friendly way to suggest next Tuesday}.`
@@ -27,6 +29,8 @@ Use single braces. You can change the shortcut, provider, and model in settings.
 
 Brace detection happens locally in the focused text field. Text is sent directly to your configured provider only when you request suggestions. API keys stay in macOS Keychain. The last 20 sets of suggestions are kept in memory until you quit or save settings; prompts and suggestions are never saved to disk. There is no Lacuna server or analytics.
 
+Updates use [Sparkle](https://sparkle-project.org/) and GitHub, with signed release metadata and archives verified before installation. Update checks do not send your editor text or API keys; system profiling is disabled.
+
 Lacuna uses macOS Accessibility APIs. Support depends on how each app exposes its editable text and text positions; some web editors, terminals, and custom controls may not work. Read-only pages and secure password fields are excluded. Try TextEdit in plain-text mode first.
 
 ## Build from source
@@ -41,7 +45,7 @@ cd lacuna
 
 This builds, installs to `~/Applications`, and opens Lacuna. Use `./scripts/build.sh` to build only, `swift test` to run tests, or `./scripts/release.sh` to create a universal DMG and ZIP in `dist/` (requires full Xcode).
 
-Release scripts default to version `0.2.2`, build `4`; override them with `--version` and `BUILD_NUMBER`. Optional `SIGNING_IDENTITY` and `NOTARY_PROFILE` environment variables enable Developer ID signing and notarization with your existing credentials. Nothing is published automatically.
+Release scripts default to version `0.3.0`, build `5`; override them with `--version` and `BUILD_NUMBER`. Releases require the Sparkle signing key; ordinary builds do not. See [Publishing releases](docs/RELEASING.md) for signing and updating the feed. Nothing is published automatically.
 
 ## License
 
