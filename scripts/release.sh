@@ -3,13 +3,15 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
-VERSION="${VERSION:-0.1.0}"
+VERSION="${VERSION:-0.2.0}"
+BUILD_NUMBER="${BUILD_NUMBER:-2}"
 
 usage() {
     cat <<'USAGE'
-Usage: scripts/release.sh [--version 0.1.0]
+Usage: scripts/release.sh [--version 0.2.0]
 
 Build a universal app, ZIP, and DMG in dist/ without publishing them. Requires Xcode.
+Environment: VERSION (default: 0.2.0), BUILD_NUMBER (default: 2).
 Set SIGNING_IDENTITY to a Developer ID Application identity to sign.
 Also set NOTARY_PROFILE to an existing notarytool Keychain profile to notarize.
 Without these, output is ad-hoc signed and is not notarized by Apple.
@@ -31,7 +33,7 @@ if [[ -n "${NOTARY_PROFILE:-}" && ( -z "${SIGNING_IDENTITY:-}" || "$SIGNING_IDEN
     exit 1
 fi
 
-"$ROOT/scripts/build.sh" --universal --version "$VERSION"
+BUILD_NUMBER="$BUILD_NUMBER" "$ROOT/scripts/build.sh" --universal --version "$VERSION"
 APP="$ROOT/dist/Lacuna.app"
 STEM="$ROOT/dist/Lacuna-$VERSION-universal"
 STAGING="$(mktemp -d "$ROOT/dist/.lacuna-release.XXXXXX")"

@@ -8,9 +8,9 @@ macOS 13 or later, Apple Silicon or Intel, and an OpenAI or Anthropic API key (o
 
 ## Install
 
-Download the DMG or ZIP from [GitHub Releases](https://github.com/jdamon96/lacuna/releases), move Lacuna to Applications, and open it. The first release is a preview: it is ad-hoc signed, without Apple Developer ID signing or notarization. macOS may require you to allow it in **System Settings → Privacy & Security → Open Anyway** after the first launch attempt.
+Download the DMG or ZIP from [GitHub Releases](https://github.com/jdamon96/lacuna/releases), move Lacuna to Applications, and open it. Preview downloads are ad-hoc signed, without Apple Developer ID signing or notarization. macOS may require you to allow the app in **System Settings → Privacy & Security → Open Anyway** after the first launch attempt.
 
-Grant **Accessibility** access when prompted, then choose your provider, model, and API key in Lacuna’s menu bar settings.
+Grant **Accessibility** access when prompted, then open Lacuna’s menu bar settings. Choose your provider, enter your API key, and select a model from the dropdown. **Refresh** loads the available OpenAI or Anthropic models using your key. You can also enter a model ID manually, including for custom servers. Click **Save** when ready.
 
 ## Use
 
@@ -18,6 +18,8 @@ Grant **Accessibility** access when prompted, then choose your provider, model, 
 2. Keep that text field focused. Lacuna marks the nearest supported template as you type; place the cursor inside one to choose between multiple templates.
 3. Press **⇧⌘K** to generate three options using the surrounding text.
 4. Press **1**, **2**, or **3** to replace the braces with your choice. **Escape** dismisses the suggestions.
+
+Use **↑/↓** to scroll long suggestions, **Tab** to move to the next option, and **Return** to accept the selected option.
 
 Use single braces. You can change the shortcut, provider, and model in settings. OpenAI and Anthropic use their respective native APIs. Choose **OpenAI-compatible** to configure a custom or local server with a Chat Completions API.
 
@@ -39,7 +41,7 @@ cd lacuna
 
 This builds, installs to `~/Applications`, and opens Lacuna. Use `./scripts/build.sh` to build only, `swift test` to run tests, or `./scripts/release.sh` to create a universal DMG and ZIP in `dist/` (requires full Xcode).
 
-Release scripts accept `--version 0.1.0`. Optional `SIGNING_IDENTITY` and `NOTARY_PROFILE` environment variables enable Developer ID signing and notarization with your existing credentials. Nothing is published automatically.
+Release scripts default to version `0.2.0`, build `2`; override them with `--version` and `BUILD_NUMBER`. Optional `SIGNING_IDENTITY` and `NOTARY_PROFILE` environment variables enable Developer ID signing and notarization with your existing credentials. Nothing is published automatically.
 
 ## License
 

@@ -34,10 +34,10 @@ struct SettingsView: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 20) {
+        VStack(alignment: .leading, spacing: 12) {
             HStack(alignment: .center, spacing: 16) {
                 Text("{ }").font(.system(size: 28, weight: .medium, design: .monospaced))
-                    .foregroundStyle(.white).frame(width: 62, height: 62)
+                    .foregroundStyle(.white).frame(width: 52, height: 52)
                     .background(Color.indigo.gradient, in: RoundedRectangle(cornerRadius: 16))
                 VStack(alignment: .leading, spacing: 4) {
                     Text("Lacuna").font(.system(size: 29, weight: .semibold))
@@ -46,7 +46,6 @@ struct SettingsView: View {
                 Spacer()
             }
             VStack(alignment: .leading, spacing: 10) {
-                Text("Write naturally, with a little room for help.").font(.system(size: 14, weight: .medium))
                 Text("Thanks for your time. {a warm, brief sign-off}")
                     .font(.system(size: 13, design: .monospaced)).foregroundStyle(.secondary)
                 HStack {
@@ -55,16 +54,16 @@ struct SettingsView: View {
                     Spacer()
                     Button("Try it", action: openPlayground).controlSize(.small)
                 }
-            }.padding(15).frame(maxWidth: .infinity, alignment: .leading)
+            }.padding(12).frame(maxWidth: .infinity, alignment: .leading)
                 .background(.primary.opacity(0.035), in: RoundedRectangle(cornerRadius: 12))
             Form {
                 Section {
                     Picker("Provider", selection: $provider) {
                         ForEach(LLMProvider.allCases, id: \.self) { Text($0.displayName).tag($0) }
                     }
-                    TextField("Model", text: $model)
                     if provider == .custom { TextField("Base URL", text: $baseURL) }
                     SecureField("API key", text: $key)
+                    ModelPicker(provider: provider, baseURL: baseURL, apiKey: key, model: $model)
                     Text("Your key stays in macOS Keychain. Requests go directly to your provider.")
                         .font(.caption).foregroundStyle(.secondary)
                 }
@@ -90,7 +89,7 @@ struct SettingsView: View {
                     Text("Only the focused editable field is inspected. Nearby text is sent when you press the shortcut. Password fields are excluded.")
                         .font(.caption).foregroundStyle(.secondary)
                 }
-            }.formStyle(.grouped).scrollDisabled(true).disabled(testing)
+            }.formStyle(.grouped).disabled(testing)
             HStack {
                 Text(status).font(.system(size: 12)).foregroundStyle(.secondary)
                     .lineLimit(3).frame(maxWidth: .infinity, alignment: .leading)
@@ -108,8 +107,10 @@ struct SettingsView: View {
         }
         .onChange(of: baseURL) { url in
             // Switching a server must never carry an existing key to the new destination.
-            key = preferences.key(for: provider, url: url)
+            key = preferences.key(for: provider, url: url); status = ""
         }
+        .onChange(of: model) { _ in status = "" }
+        .onChange(of: key) { _ in status = "" }
         .onChange(of: launchAtLogin) { enabled in
             if syncingLogin { syncingLogin = false; return }
             do { if enabled { try SMAppService.mainApp.register() } else { try SMAppService.mainApp.unregister() } }
@@ -140,7 +141,9 @@ struct SettingsView: View {
         guard saveShortcut(shortcut) else { status = "That shortcut is already in use. Choose another."; return }
         do {
             try preferences.save(provider: provider, baseURL: baseURL, model: model, apiKey: key, shortcut: shortcut)
-            status = "Saved. You’re ready to fill a gap."
+            status = key.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && provider != .custom
+                ? "Saved. Add your API key to connect your model."
+                : "Saved. You’re ready to fill a gap."
         } catch { _ = saveShortcut(preferences.shortcut); status = error.localizedDescription }
     }
     private func testConnection() {

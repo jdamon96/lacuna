@@ -1,5 +1,6 @@
 import AppKit
 import SwiftUI
+import LacunaCore
 
 final class PassivePanel: NSPanel {
     override var canBecomeKey: Bool { false }
@@ -14,6 +15,131 @@ final class SuggestionState: ObservableObject {
     @Published var loading = false
     var choose: ((Int) -> Void)?
     var dismiss: (() -> Void)?
+    var navigate: ((_ direction: Int, _ jump: Bool) -> Void)?
+}
+
+private struct SuggestionRow: View {
+    @ObservedObject var state: SuggestionState
+    let index: Int
+    let option: String
+    let width: CGFloat
+
+    var body: some View {
+        Button { state.choose?(index) } label: {
+            HStack(alignment: .top, spacing: 12) {
+                Text("\(index + 1)")
+                    .font(.system(size: 12, weight: .medium, design: .monospaced))
+                    .frame(width: 22, height: 22)
+                    .background(.primary.opacity(0.06), in: RoundedRectangle(cornerRadius: 5))
+                Text(option).font(.system(size: 14)).lineSpacing(3)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            .padding(11).contentShape(Rectangle())
+            .background(index == state.selected ? Color.indigo.opacity(0.11) : Color.primary.opacity(0.025), in: RoundedRectangle(cornerRadius: 9))
+            .overlay(RoundedRectangle(cornerRadius: 9).stroke(index == state.selected ? Color.indigo.opacity(0.25) : .clear, lineWidth: 1))
+        }.buttonStyle(.plain)
+        .accessibilityLabel("Option \(index + 1): \(option)")
+        .frame(width: width)
+    }
+}
+
+private final class SuggestionDocument: NSView {
+    override var isFlipped: Bool { true }
+}
+
+/// Own the scroll view so keyboard events can scroll it without making the panel
+/// key or moving the insertion point out of the user's editor.
+final class SuggestionScrollView: NSScrollView {
+    private let document = SuggestionDocument()
+    private var rows: [NSHostingView<SuggestionRow>] = []
+    private var options: [String] = []
+    private var state: SuggestionState?
+    private var rowWidth: CGFloat = 0
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        drawsBackground = false
+        borderType = .noBorder
+        hasVerticalScroller = true
+        scrollerStyle = .overlay
+        horizontalScrollElasticity = .none
+        verticalScrollElasticity = .none
+        documentView = document
+    }
+    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+
+    func update(state: SuggestionState) {
+        self.state = state
+        state.navigate = { [weak self] direction, jump in self?.navigate(direction: direction, jump: jump) }
+        guard options != state.options else { return }
+        options = state.options
+        rows.forEach { $0.removeFromSuperview() }
+        rows = options.enumerated().map { index, option in
+            let row = NSHostingView(rootView: SuggestionRow(state: state, index: index, option: option, width: max(1, contentSize.width)))
+            document.addSubview(row)
+            return row
+        }
+        rowWidth = 0
+        needsLayout = true
+        layoutSubtreeIfNeeded()
+        contentView.scroll(to: .zero)
+        reflectScrolledClipView(contentView)
+    }
+
+    override func layout() {
+        super.layout()
+        layoutRows(width: max(1, contentSize.width))
+    }
+
+    func fittingHeight(for width: CGFloat) -> CGFloat {
+        layoutRows(width: width)
+        return min(330, document.frame.height)
+    }
+
+    private func layoutRows(width: CGFloat) {
+        guard let state else { return }
+        guard width != rowWidth else { return }
+        rowWidth = width
+        var y: CGFloat = 0
+        for (index, row) in rows.enumerated() {
+            row.rootView = SuggestionRow(state: state, index: index, option: options[index], width: width)
+            let height = ceil(row.fittingSize.height)
+            row.frame = NSRect(x: 0, y: y, width: width, height: height)
+            y += height + 6
+        }
+        document.frame = NSRect(x: 0, y: 0, width: width, height: max(0, y - 6))
+    }
+
+    func navigate(direction: Int, jump: Bool = false) {
+        layoutSubtreeIfNeeded()
+        guard let state else { return }
+        let position = SuggestionNavigation.move(
+            selected: state.selected, offset: contentView.bounds.minY,
+            viewportHeight: contentView.bounds.height,
+            rows: rows.map { Double($0.frame.minY)...Double($0.frame.maxY) },
+            direction: direction, jump: jump)
+        state.selected = position.selected
+        contentView.scroll(to: NSPoint(x: 0, y: position.offset))
+        reflectScrolledClipView(contentView)
+    }
+}
+
+private struct SuggestionList: NSViewRepresentable {
+    @ObservedObject var state: SuggestionState
+
+    func makeNSView(context: Context) -> SuggestionScrollView {
+        let scroll = SuggestionScrollView(frame: .zero)
+        scroll.update(state: state)
+        return scroll
+    }
+    func updateNSView(_ scroll: SuggestionScrollView, context: Context) {
+        scroll.update(state: state)
+    }
+    func sizeThatFits(_ proposal: ProposedViewSize, nsView: SuggestionScrollView, context: Context) -> NSSize? {
+        let width = proposal.width.flatMap { $0.isFinite ? $0 : nil } ?? 398
+        return NSSize(width: width, height: nsView.fittingHeight(for: max(1, width)))
+    }
 }
 
 struct SuggestionView: View {
@@ -37,28 +163,8 @@ struct SuggestionView: View {
             } else if !state.message.isEmpty {
                 Text(state.message).font(.system(size: 13)).fixedSize(horizontal: false, vertical: true).padding(.vertical, 8)
             } else {
-                ScrollView {
-                    VStack(spacing: 6) {
-                        ForEach(Array(state.options.enumerated()), id: \.offset) { index, option in
-                            Button { state.choose?(index) } label: {
-                                HStack(alignment: .top, spacing: 12) {
-                                    Text("\(index + 1)")
-                                        .font(.system(size: 12, weight: .medium, design: .monospaced))
-                                        .frame(width: 22, height: 22)
-                                        .background(.primary.opacity(0.06), in: RoundedRectangle(cornerRadius: 5))
-                                    Text(option).font(.system(size: 14)).lineSpacing(3)
-                                        .frame(maxWidth: .infinity, alignment: .leading)
-                                        .fixedSize(horizontal: false, vertical: true)
-                                }
-                                .padding(11).contentShape(Rectangle())
-                                .background(index == state.selected ? Color.indigo.opacity(0.11) : Color.primary.opacity(0.025), in: RoundedRectangle(cornerRadius: 9))
-                                .overlay(RoundedRectangle(cornerRadius: 9).stroke(index == state.selected ? Color.indigo.opacity(0.25) : .clear, lineWidth: 1))
-                            }.buttonStyle(.plain)
-                            .accessibilityLabel("Option \(index + 1): \(option)")
-                        }
-                    }
-                }.frame(maxHeight: 330)
-                Text("1–3 to insert  ·  ↑↓ to choose  ·  ↵ to accept")
+                SuggestionList(state: state).frame(maxHeight: 330)
+                Text("1–3 insert  ·  ↑↓ read  ·  tab next  ·  ↵ accept")
                     .font(.system(size: 11)).foregroundStyle(.secondary)
             }
         }

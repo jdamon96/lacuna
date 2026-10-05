@@ -98,6 +98,14 @@ final class CompletionClientTests: XCTestCase {
         }
     }
 
+    func testRejectsNewlinesInAuthenticationKeys() {
+        for key in ["first\nsecond", "first\rsecond", "first\r\nsecond"] {
+            XCTAssertThrowsError(try CompletionClient().makeRequest(for: template, in: text, configuration: LLMConfiguration(provider: .openAI, apiKey: key))) {
+                XCTAssertEqual($0 as? CompletionError, .unauthorized)
+            }
+        }
+    }
+
     func testResponseParsingAcrossProviders() throws {
         let json = #"{"suggestions":["Welcome!","Glad you’re here.","Make yourself at home."]}"#
         let expected = ["Welcome!", "Glad you’re here.", "Make yourself at home."]

@@ -134,7 +134,7 @@ public struct CompletionClient {
         let key = configuration.apiKey.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !model.isEmpty else { throw CompletionError.missingModel }
         guard configuration.provider == .custom || !key.isEmpty else { throw CompletionError.missingAPIKey }
-        guard !key.contains("\r"), !key.contains("\n") else { throw CompletionError.unauthorized }
+        guard key.rangeOfCharacter(from: .newlines) == nil else { throw CompletionError.unauthorized }
         guard template.range.location != NSNotFound, template.range.location >= 0,
               template.range.length >= 2, template.range.location <= text.utf16.count,
               template.range.length <= text.utf16.count - template.range.location,
@@ -195,7 +195,7 @@ public struct CompletionClient {
         return request
     }
 
-    static func endpoint(for configuration: LLMConfiguration) throws -> URL {
+    static func endpoint(for configuration: LLMConfiguration, resource: String? = nil) throws -> URL {
         let base = configuration.baseURL.trimmingCharacters(in: .whitespacesAndNewlines)
         guard var components = URLComponents(string: base),
               let host = components.host?.lowercased(), !host.isEmpty,
@@ -217,7 +217,7 @@ public struct CompletionClient {
         case .custom: suffix = "chat/completions"
         }
         let path = components.path.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
-        components.path = "/" + (path.isEmpty ? "" : path + "/") + suffix
+        components.path = "/" + (path.isEmpty ? "" : path + "/") + (resource ?? suffix)
         guard let url = components.url else { throw CompletionError.invalidEndpoint }
         return url
     }
@@ -264,7 +264,7 @@ public struct CompletionClient {
     }
 }
 
-private final class NoRedirects: NSObject, URLSessionTaskDelegate {
+final class NoRedirects: NSObject, URLSessionTaskDelegate {
     func urlSession(_ session: URLSession, task: URLSessionTask, willPerformHTTPRedirection response: HTTPURLResponse,
                     newRequest request: URLRequest, completionHandler: @escaping (URLRequest?) -> Void) {
         completionHandler(nil)

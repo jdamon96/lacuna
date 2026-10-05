@@ -274,7 +274,7 @@ final class AppController: NSObject, NSApplicationDelegate {
             }
             if code == 125 || code == 126 || code == 48 {
                 let delta = code == 126 ? -1 : 1
-                panel.state.selected = (panel.state.selected + delta + options.count) % options.count
+                panel.state.navigate?(delta, code == 48)
                 return true
             }
             if code == 36 || code == 76 {
