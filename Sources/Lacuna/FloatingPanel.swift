@@ -219,6 +219,7 @@ final class FloatingPanel {
 }
 
 final class BraceHighlight {
+    enum Style { case opening, complete }
     private let panel: PassivePanel
     init() {
         panel = PassivePanel(contentRect: .zero, styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
@@ -231,9 +232,25 @@ final class BraceHighlight {
         view.layer?.borderWidth = 1; view.layer?.cornerRadius = 4
         panel.contentView = view
     }
-    func show(_ rect: CGRect) {
+    func show(_ rect: CGRect, style: Style = .complete) {
         guard rect.width > 0, rect.height > 0, rect.height < 180 else { hide(); return }
-        panel.setFrame(FloatingPanel.appKitRect(rect).insetBy(dx: -2, dy: -2), display: true)
+        let frame = FloatingPanel.appKitRect(rect)
+        let layer = panel.contentView?.layer
+        switch style {
+        case .opening:
+            // A quiet underline at the opening brace acknowledges typing without
+            // covering unfinished text or looking like a ready-to-fill selection.
+            layer?.backgroundColor = NSColor.systemIndigo.withAlphaComponent(0.8).cgColor
+            layer?.borderWidth = 0
+            layer?.cornerRadius = 1
+            panel.setFrame(CGRect(x: frame.minX - 1, y: frame.minY - 2,
+                                  width: max(7, frame.width + 2), height: 2), display: true)
+        case .complete:
+            layer?.backgroundColor = NSColor.systemIndigo.withAlphaComponent(0.08).cgColor
+            layer?.borderWidth = 1
+            layer?.cornerRadius = 4
+            panel.setFrame(frame.insetBy(dx: -2, dy: -2), display: true)
+        }
         panel.orderFrontRegardless()
     }
     func hide() { panel.orderOut(nil) }

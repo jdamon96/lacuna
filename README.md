@@ -15,7 +15,7 @@ Grant **Accessibility** access when prompted, then open Lacuna’s menu bar sett
 ## Use
 
 1. Type something like `Let’s meet {a friendly way to suggest next Tuesday}.`
-2. Keep that text field focused. Lacuna marks the nearest supported template as you type; place the cursor inside one to choose between multiple templates.
+2. Keep that text field focused. A subtle underline marks an unfinished opening `{`; closing it highlights the completed template. Lacuna marks the nearest supported template; place the cursor inside one to choose between multiple templates.
 3. Press **⇧⌘K** to generate three options using the surrounding text.
 4. Press **1**, **2**, or **3** to replace the braces with your choice. **Escape** dismisses the suggestions.
 

@@ -63,6 +63,40 @@ public struct BraceTemplate: Equatable, Sendable {
         }
     }
 
+    /// The opening brace of an unfinished expression containing a collapsed caret.
+    /// Scan beyond the caret too: a later closing or nested brace makes this
+    /// expression complete or invalid, even while the caret is near its beginning.
+    public static func pendingOpening(in text: String, selection: NSRange) -> NSRange? {
+        let units = Array(text.utf16)
+        guard selection.location != NSNotFound, selection.location >= 0,
+              selection.length == 0, selection.location <= units.count,
+              selection.location == units.count || !(0xDC00...0xDFFF).contains(units[selection.location]) else { return nil }
+        var depth = 0
+        var opening = 0
+        var invalid = false
+        var backslashes = 0
+
+        for (index, unit) in units.enumerated() {
+            let escaped = backslashes % 2 == 1
+            backslashes = unit == 92 ? backslashes + 1 : 0
+            guard !escaped else { continue }
+            if unit == 123 {
+                if depth == 0 {
+                    opening = index
+                    invalid = index > 0 && units[index - 1] == 36
+                } else {
+                    invalid = true
+                }
+                depth += 1
+            } else if unit == 125, depth > 0 {
+                depth -= 1
+            }
+        }
+
+        guard depth == 1, !invalid, selection.location > opening else { return nil }
+        return NSRange(location: opening, length: 1)
+    }
+
     /// Nearby text, limited in UTF-16 units without splitting composed characters.
     /// Always preserves the complete template, even when it exceeds `limit`.
     public func context(in text: String, limit: Int = 6_000) -> String {

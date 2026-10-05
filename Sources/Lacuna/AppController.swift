@@ -212,6 +212,10 @@ final class AppController: NSObject, NSApplicationDelegate {
         dismiss(); highlight.hide()
         do {
             let input = try capture()
+            if let opening = BraceTemplate.pendingOpening(in: input.text, selection: input.selection) {
+                showMessage("Close the instruction with } to get suggestions.", anchor: bounds(opening, in: input) ?? input.anchor)
+                return
+            }
             guard let template = BraceTemplate.find(in: input.text, selection: input.selection) else {
                 showMessage("Type an instruction in {braces}, then place your cursor nearby.", anchor: input.anchor)
                 return
@@ -243,8 +247,14 @@ final class AppController: NSObject, NSApplicationDelegate {
             if !matches(input) { dismiss() }
             return
         }
-        guard !panel.isVisible, preferences.highlights, let candidate = try? capture(),
-              let template = BraceTemplate.find(in: candidate.text, selection: candidate.selection),
+        guard !panel.isVisible, preferences.highlights, let candidate = try? capture() else { highlight.hide(); return }
+        // The expression being written takes priority over a completed template elsewhere.
+        if let opening = BraceTemplate.pendingOpening(in: candidate.text, selection: candidate.selection) {
+            if let rect = bounds(opening, in: candidate) { highlight.show(rect, style: .opening) }
+            else { highlight.hide() }
+            return
+        }
+        guard let template = BraceTemplate.find(in: candidate.text, selection: candidate.selection),
               let rect = bounds(template.range, in: candidate) else { highlight.hide(); return }
         highlight.show(rect)
     }
