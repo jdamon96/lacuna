@@ -1,5 +1,6 @@
 import AppKit
 import ApplicationServices
+import LacunaCore
 
 /// Accessibility ranges are UTF-16 offsets. Frames are global screen coordinates
 /// with the origin at the top-left of the main display, not AppKit coordinates.
@@ -36,7 +37,7 @@ enum AccessibilityBridgeError: LocalizedError {
         case .unsupportedSelection:
             return "This text field does not support accessible text selection. Try another text field."
         case .changedText:
-            return "The text, cursor, or focused field changed. Run Lacuna again to get fresh suggestions."
+            return "The text, cursor, or focused field changed. Return to the braces and reopen Lacuna."
         case .invalidRange:
             return "The template is no longer at its original position. Run Lacuna again."
         case .clipboardUnavailable:
@@ -51,8 +52,8 @@ enum AccessibilityBridgeError: LocalizedError {
 
 final class AccessibilityBridge {
     private let system = AXUIElementCreateSystemWide()
-    private var pendingClipboardRestore: DispatchWorkItem?
-    private var restoreClipboardNow: (() -> Void)?
+    private var replacing = false
+    private var pastePreferredProcesses = Set<pid_t>()
 
     var isTrusted: Bool { AXIsProcessTrusted() }
 
@@ -112,41 +113,59 @@ final class AccessibilityBridge {
 
     /// Only the requested UTF-16 range is replaced. Never sets the whole field's
     /// value, which can destroy rich text, editor state, or unrelated user edits.
-    func replace(range: NSRange, with replacement: String, in snapshot: FocusedTextSnapshot) throws {
+    @MainActor func replace(range: NSRange, with replacement: String, in snapshot: FocusedTextSnapshot) async throws {
+        guard !replacing else { throw AccessibilityBridgeError.replacementUnavailable }
+        replacing = true
+        defer { replacing = false }
+        try Task.checkCancellation()
         guard valid(range, in: snapshot.text) else { throw AccessibilityBridgeError.invalidRange }
         try validate(snapshot, expectedSelection: snapshot.selection)
         let expected = (snapshot.text as NSString).replacingCharacters(in: range, with: replacement)
-        if expected == snapshot.text { return }
+        if sameText(expected, snapshot.text) { return }
 
+        try Task.checkCancellation()
         guard let rangeValue = axRange(range),
               AXUIElementSetAttributeValue(
                 snapshot.element, kAXSelectedTextRangeAttribute as CFString, rangeValue
               ) == .success else { throw AccessibilityBridgeError.unsupportedSelection }
 
+        var insertionAttempted = false
         do {
             // Setting a range can fail silently in a custom editor. Read it back
             // before either direct replacement or sending a paste event.
-            try validate(snapshot, expectedSelection: range)
-            if isSettable(kAXSelectedTextAttribute, on: snapshot.element) {
-                let result = AXUIElementSetAttributeValue(
+            try await waitForSelection(range, in: snapshot)
+            if !shouldPasteFirst(in: snapshot), isSettable(kAXSelectedTextAttribute, on: snapshot.element) {
+                try Task.checkCancellation()
+                try validate(snapshot, expectedSelection: range)
+                try Task.checkCancellation()
+                insertionAttempted = true
+                _ = AXUIElementSetAttributeValue(
                     snapshot.element, kAXSelectedTextAttribute as CFString, replacement as CFString
                 )
-                if result == .success {
-                    guard awaitText(expected, replacing: snapshot.text, on: snapshot.element) else {
-                        throw AccessibilityBridgeError.replacementUnconfirmed
-                    }
+                // Success can mean an ignored AX setter; an error can accompany
+                // a completed edit. The text, not the return code, decides.
+                switch await waitForReplacement(expected, range: range, in: snapshot, timeout: 1.2) {
+                case .confirmed:
                     return
+                case .unchanged:
+                    // A browser/custom editor may advertise a writable setter
+                    // but ignore it. Avoid that route in this process next time.
+                    pastePreferredProcesses.insert(snapshot.pid)
+                case .unconfirmed:
+                    throw AccessibilityBridgeError.replacementUnconfirmed
                 }
-                // An AX error can accompany a successful edit. Never paste
-                // again unless we can prove the original text remains intact.
-                if text(of: snapshot.element) == expected { return }
-                try validate(snapshot, expectedSelection: range)
             }
-            try paste(replacement, expected: expected, range: range, in: snapshot)
+            // Dismissing the chooser while an AX attempt was being verified
+            // must not cause a later paste. Once paste is posted, however,
+            // bounded verification and clipboard cleanup always finish.
+            try Task.checkCancellation()
+            try validate(snapshot, expectedSelection: range)
+            insertionAttempted = true
+            try await paste(replacement, expected: expected, range: range, in: snapshot)
         } catch {
-            // An edit may still be in flight when verification times out. In
-            // that case restoring the old caret could redirect a delayed paste.
-            if (error as? AccessibilityBridgeError) != .replacementUnconfirmed {
+            // After any insertion command, its outcome may be delayed. Moving
+            // the caret then could redirect that command into unrelated text.
+            if !insertionAttempted {
                 restoreSelectionIfUnchanged(snapshot, temporaryRange: range)
             }
             throw error
@@ -186,20 +205,15 @@ final class AccessibilityBridge {
         guard CFEqual(focused, snapshot.element) else { throw AccessibilityBridgeError.changedText }
         try requireEditable(focused)
         guard NSWorkspace.shared.frontmostApplication?.processIdentifier == snapshot.pid,
-              text(of: focused) == snapshot.text,
+              let current = text(of: focused), sameText(current, snapshot.text),
               selection(of: focused) == expectedSelection else {
             throw AccessibilityBridgeError.changedText
         }
     }
 
-    private func paste(_ replacement: String, expected: String, range: NSRange,
-                       in snapshot: FocusedTextSnapshot) throws {
-        // Flush a previous restore before capturing a new clipboard snapshot.
-        pendingClipboardRestore?.cancel()
-        restoreClipboardNow?()
-        pendingClipboardRestore = nil
-        restoreClipboardNow = nil
-
+    @MainActor private func paste(_ replacement: String, expected: String, range: NSRange,
+                                  in snapshot: FocusedTextSnapshot) async throws {
+        try Task.checkCancellation()
         let pasteboard = NSPasteboard.general
         let originalChangeCount = pasteboard.changeCount
         let savedItems = try copyPasteboardItems(pasteboard)
@@ -213,6 +227,7 @@ final class AccessibilityBridge {
             throw AccessibilityBridgeError.replacementUnavailable
         }
 
+        try Task.checkCancellation()
         pasteboard.clearContents()
         let didWrite = pasteboard.setString(replacement, forType: .string)
         let lacunaChangeCount = pasteboard.changeCount
@@ -222,16 +237,15 @@ final class AccessibilityBridge {
             pasteboard.clearContents()
             if !savedItems.isEmpty { _ = pasteboard.writeObjects(savedItems) }
         }
+        // This scope outlives cancellation and verification. Do not restore on
+        // a fixed timer: a slow editor may not have consumed the paste yet.
+        defer { restore() }
         guard didWrite else {
-            restore()
             throw AccessibilityBridgeError.clipboardUnavailable
         }
-        do {
-            try validate(snapshot, expectedSelection: range)
-        } catch {
-            restore()
-            throw error
-        }
+        try Task.checkCancellation()
+        try validate(snapshot, expectedSelection: range)
+        try Task.checkCancellation()
 
         keyDown.flags = .maskCommand
         keyUp.flags = .maskCommand
@@ -240,14 +254,10 @@ final class AccessibilityBridge {
         keyDown.postToPid(snapshot.pid)
         keyUp.postToPid(snapshot.pid)
 
-        // Keep the text available long enough for the receiving app to consume
-        // the paste. Restoration is conditional on our pasteboard still owning
-        // the latest change, including if verification below times out.
-        restoreClipboardNow = restore
-        let work = DispatchWorkItem(block: restore)
-        pendingClipboardRestore = work
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.8, execute: work)
-        guard awaitText(expected, replacing: snapshot.text, on: snapshot.element) else {
+        // Exactly one paste is posted. In particular, never retry a slow paste
+        // or switch insertion methods after a partial/mismatched edit.
+        let result = await waitForReplacement(expected, range: range, in: snapshot, timeout: 3.0)
+        guard result == .confirmed else {
             throw AccessibilityBridgeError.replacementUnconfirmed
         }
     }
@@ -264,25 +274,96 @@ final class AccessibilityBridge {
         }
     }
 
-    private func awaitText(_ expected: String, replacing original: String, on element: AXUIElement) -> Bool {
-        // AX calls cross process boundaries; allow native and browser editors a
-        // short, bounded interval to expose the completed edit.
-        let deadline = ProcessInfo.processInfo.systemUptime + 0.35
+    @MainActor private func waitForSelection(_ range: NSRange, in snapshot: FocusedTextSnapshot) async throws {
+        let deadline = ProcessInfo.processInfo.systemUptime + 0.5
         repeat {
-            let current = text(of: element)
-            if current == expected { return true }
-            if let current, current != original { return false }
-            Thread.sleep(forTimeInterval: 0.015)
-        } while ProcessInfo.processInfo.systemUptime < deadline
-        return text(of: element) == expected
+            try Task.checkCancellation()
+            let focused = try focusedElement()
+            guard CFEqual(focused, snapshot.element),
+                  NSWorkspace.shared.frontmostApplication?.processIdentifier == snapshot.pid else {
+                throw AccessibilityBridgeError.changedText
+            }
+            try requireEditable(focused)
+            guard let current = text(of: focused), sameText(current, snapshot.text),
+                  let selected = selection(of: focused) else { throw AccessibilityBridgeError.changedText }
+            if selected == range { return }
+            guard selected == snapshot.selection else { throw AccessibilityBridgeError.changedText }
+            if ProcessInfo.processInfo.systemUptime >= deadline { break }
+            await pauseForReadback()
+        } while true
+        throw AccessibilityBridgeError.unsupportedSelection
+    }
+
+    @MainActor private func waitForReplacement(_ expected: String, range: NSRange,
+                                               in snapshot: FocusedTextSnapshot,
+                                               timeout: TimeInterval) async -> ReplacementReadback.Outcome {
+        var readback = ReplacementReadback(original: snapshot.text, expected: expected)
+        let deadline = ProcessInfo.processInfo.systemUptime + timeout
+        repeat {
+            // Refresh the object from the focused field rather than repeatedly
+            // reading only the object captured before the network request.
+            if isTrusted, let focused = try? focusedElement(), CFEqual(focused, snapshot.element),
+               NSWorkspace.shared.frontmostApplication?.processIdentifier == snapshot.pid,
+               (try? requireEditable(focused)) != nil {
+                readback.observe(text: text(of: focused), targetIsFocused: true,
+                                 selectionMatches: selection(of: focused) == range)
+            } else {
+                readback.observe(text: nil, targetIsFocused: false, selectionMatches: false)
+                // Do not end early after posting a paste: that would restore
+                // the previous clipboard before the queued event is consumed.
+            }
+            if readback.confirmed { return .confirmed }
+            if ProcessInfo.processInfo.systemUptime >= deadline { return readback.outcome }
+            // Intermediate values are normal in web editors. Keep observing,
+            // but the readback helper permanently rules out another insertion.
+            await pauseForReadback()
+        } while true
+    }
+
+    @MainActor private func pauseForReadback() async {
+        // A cancelled task still has to finish observing an already-posted edit
+        // and restoring its clipboard. Task.sleep would throw immediately and
+        // turn that cleanup into a busy loop after cancellation.
+        await withCheckedContinuation { continuation in
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { continuation.resume() }
+        }
+    }
+
+    private func shouldPasteFirst(in snapshot: FocusedTextSnapshot) -> Bool {
+        if pastePreferredProcesses.contains(snapshot.pid) { return true }
+        if let app = NSRunningApplication(processIdentifier: snapshot.pid) {
+            let identifier = app.bundleIdentifier?.lowercased() ?? ""
+            let browsers = ["com.apple.safari", "com.google.chrome", "com.microsoft.edgemac",
+                            "org.mozilla.firefox", "org.chromium.chromium", "com.brave.browser",
+                            "company.thebrowser.browser", "com.vivaldi.vivaldi", "com.operasoftware.opera"]
+            if browsers.contains(where: { identifier == $0 || identifier.hasPrefix($0 + ".") }) { return true }
+            if let framework = app.bundleURL?.appendingPathComponent("Contents/Frameworks/Electron Framework.framework"),
+               FileManager.default.fileExists(atPath: framework.path) { return true }
+        }
+        // Embedded web editors can exist inside otherwise native applications.
+        // Inspect only ancestor roles, never text from another field.
+        var ancestor = snapshot.element
+        for _ in 0..<12 {
+            if attribute(kAXRoleAttribute, on: ancestor) as? String == "AXWebArea" { return true }
+            guard let parent = attribute(kAXParentAttribute, on: ancestor),
+                  CFGetTypeID(parent) == AXUIElementGetTypeID() else { break }
+            let next = unsafeBitCast(parent, to: AXUIElement.self)
+            if CFEqual(ancestor, next) { break }
+            ancestor = next
+        }
+        return false
     }
 
     private func restoreSelectionIfUnchanged(_ snapshot: FocusedTextSnapshot, temporaryRange: NSRange) {
         guard let focused = try? focusedElement(), CFEqual(focused, snapshot.element),
-              text(of: focused) == snapshot.text,
+              let current = text(of: focused), sameText(current, snapshot.text),
               selection(of: focused) == temporaryRange,
               let originalRange = axRange(snapshot.selection) else { return }
         _ = AXUIElementSetAttributeValue(focused, kAXSelectedTextRangeAttribute as CFString, originalRange)
+    }
+
+    private func sameText(_ lhs: String, _ rhs: String) -> Bool {
+        lhs.utf16.elementsEqual(rhs.utf16)
     }
 
     private func attribute(_ name: String, on element: AXUIElement) -> CFTypeRef? {

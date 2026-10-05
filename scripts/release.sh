@@ -3,15 +3,15 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
-VERSION="${VERSION:-0.2.1}"
-BUILD_NUMBER="${BUILD_NUMBER:-3}"
+VERSION="${VERSION:-0.2.2}"
+BUILD_NUMBER="${BUILD_NUMBER:-4}"
 
 usage() {
     cat <<'USAGE'
-Usage: scripts/release.sh [--version 0.2.1]
+Usage: scripts/release.sh [--version 0.2.2]
 
 Build a universal app, ZIP, and DMG in dist/ without publishing them. Requires Xcode.
-Environment: VERSION (default: 0.2.1), BUILD_NUMBER (default: 3).
+Environment: VERSION (default: 0.2.2), BUILD_NUMBER (default: 4).
 Set SIGNING_IDENTITY to a Developer ID Application identity to sign.
 Also set NOTARY_PROFILE to an existing notarytool Keychain profile to notarize.
 Without these, output is ad-hoc signed and is not notarized by Apple.

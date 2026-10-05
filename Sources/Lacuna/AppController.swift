@@ -1,5 +1,6 @@
 import AppKit
 import ApplicationServices
+import Carbon
 import SwiftUI
 import LacunaCore
 
@@ -24,6 +25,8 @@ final class AppController: NSObject, NSApplicationDelegate {
     private var playgroundText: NSTextView?
     private var timer: Timer?
     private var request: Task<Void, Never>?
+    private var insertion: Task<Void, Never>?
+    private var suggestions = SuggestionCache()
     private var requestID = UUID()
     private var input: CapturedInput?
     private var template: BraceTemplate?
@@ -46,11 +49,21 @@ final class AppController: NSObject, NSApplicationDelegate {
             if !event.isARepeat { self.invokeShortcut() }
             return nil
         }
-        preferences.onSave = { [weak self] in self?.refreshMenu() }
+        preferences.onSave = { [weak self] in
+            // A saved profile can include a different API account.
+            self?.suggestions.clear()
+            self?.refreshMenu()
+        }
         if preferences.enabled { shortcutWorks = shortcut.register(preferences.shortcut) }
         panel.state.choose = { [weak self] in self?.accept($0) }
         panel.state.dismiss = { [weak self] in self?.dismiss() }
-        keyboard.onKey = { [weak self] code, flags in self?.handleKey(code, modified: !flags.intersection([.maskCommand, .maskControl, .maskAlternate, .maskShift]).isEmpty) ?? false }
+        panel.state.copySelected = { [weak self] in self?.copySelected() }
+        panel.state.regenerate = { [weak self] in self?.beginSuggestions(refresh: true) }
+        keyboard.onKey = { [weak self] code, flags in
+            guard let self, !self.isShortcut(code, flags: flags) else { return false }
+            return self.handleKey(code, modified: !flags.intersection([.maskCommand, .maskControl, .maskAlternate, .maskShift]).isEmpty,
+                                  commandOnly: flags.intersection([.maskCommand, .maskControl, .maskAlternate, .maskShift]) == .maskCommand)
+        }
         timer = Timer.scheduledTimer(withTimeInterval: 0.45, repeats: true) { [weak self] _ in self?.poll() }
         mouseMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown, .scrollWheel]) { [weak self] _ in
             self?.dismiss(); self?.highlight.hide()
@@ -180,7 +193,10 @@ final class AppController: NSObject, NSApplicationDelegate {
         return CapturedInput(text: snapshot.text, selection: snapshot.selection, anchor: snapshot.fieldFrame, external: snapshot, local: nil)
     }
     private func matches(_ original: CapturedInput) -> Bool {
-        guard let current = try? capture(), current.text == original.text, current.selection == original.selection else { return false }
+        guard let current = try? capture(), current.text.utf16.elementsEqual(original.text.utf16), current.selection == original.selection else { return false }
+        return sameEditor(current, original)
+    }
+    private func sameEditor(_ current: CapturedInput, _ original: CapturedInput) -> Bool {
         if let a = original.external, let b = current.external { return a.pid == b.pid && CFEqual(a.element, b.element) }
         return original.local != nil && current.local === original.local
     }
@@ -198,6 +214,14 @@ final class AppController: NSObject, NSApplicationDelegate {
         guard let candidate = Shortcut.from(event) else { return false }
         return candidate.keyCode == preferences.shortcut.keyCode && candidate.modifiers == preferences.shortcut.modifiers
     }
+    private func isShortcut(_ code: UInt16, flags: CGEventFlags) -> Bool {
+        var modifiers: UInt32 = 0
+        if flags.contains(.maskCommand) { modifiers |= UInt32(cmdKey) }
+        if flags.contains(.maskControl) { modifiers |= UInt32(controlKey) }
+        if flags.contains(.maskAlternate) { modifiers |= UInt32(optionKey) }
+        if flags.contains(.maskShift) { modifiers |= UInt32(shiftKey) }
+        return UInt32(code) == preferences.shortcut.keyCode && modifiers == preferences.shortcut.modifiers
+    }
     private func invokeShortcut() {
         let now = ProcessInfo.processInfo.systemUptime
         guard now - lastInvocation > 0.15 else { return }
@@ -207,8 +231,12 @@ final class AppController: NSObject, NSApplicationDelegate {
     }
 
     @objc private func trigger() {
-        guard preferences.enabled, !isRecordingShortcut else { return }
+        guard preferences.enabled, !isRecordingShortcut, insertion == nil else { return }
         if request != nil || !panel.state.options.isEmpty { dismiss(); return }
+        beginSuggestions()
+    }
+    private func beginSuggestions(refresh: Bool = false) {
+        guard preferences.enabled, !isRecordingShortcut, insertion == nil else { return }
         dismiss(); highlight.hide()
         do {
             let input = try capture()
@@ -222,15 +250,22 @@ final class AppController: NSObject, NSApplicationDelegate {
             }
             self.input = input; self.template = template
             let anchor = bounds(template.range, in: input) ?? bounds(input.selection, in: input) ?? input.anchor
+            let configuration = preferences.configuration
+            let cacheKey = SuggestionCacheKey(text: input.text, template: template, configuration: configuration)
+            if !refresh, let cached = suggestions.suggestions(for: cacheKey) {
+                panel.show(instruction: template.instruction, anchor: anchor, options: cached)
+                startKeyboard(local: input.local != nil)
+                return
+            }
             panel.show(instruction: template.instruction, anchor: anchor, loading: true)
             startKeyboard(local: input.local != nil)
             let id = UUID(); requestID = id
-            let configuration = preferences.configuration
             request = Task { @MainActor [weak self] in
                 do {
                     let suggestions = try await CompletionClient().suggestions(for: template, in: input.text, configuration: configuration)
                     guard let self, !Task.isCancelled, self.requestID == id else { return }
                     self.request = nil
+                    self.suggestions.store(suggestions, for: cacheKey)
                     guard self.matches(input) else { self.dismiss(); return }
                     self.panel.show(instruction: template.instruction, anchor: anchor, options: suggestions)
                 } catch {
@@ -243,6 +278,8 @@ final class AppController: NSObject, NSApplicationDelegate {
     }
     private func poll() {
         guard preferences.enabled else { highlight.hide(); return }
+        // Insertion deliberately changes the selected range before changing the text.
+        guard insertion == nil else { return }
         if let input {
             if !matches(input) { dismiss() }
             return
@@ -265,7 +302,8 @@ final class AppController: NSObject, NSApplicationDelegate {
             localMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
                 if self?.isShortcut(event) == true { return event }
                 let modified = !event.modifierFlags.intersection([.command, .control, .option, .shift]).isEmpty
-                return self?.handleKey(event.keyCode, modified: modified) == true ? nil : event
+                let commandOnly = event.modifierFlags.intersection([.command, .control, .option, .shift]) == .command
+                return self?.handleKey(event.keyCode, modified: modified, commandOnly: commandOnly) == true ? nil : event
             }
         } else if !keyboard.start() {
             // Mouse buttons remain functional when macOS has not enabled key interception yet.
@@ -273,8 +311,15 @@ final class AppController: NSObject, NSApplicationDelegate {
         }
     }
     private func stopKeyboard() { keyboard.stop(); if let localMonitor { NSEvent.removeMonitor(localMonitor) }; localMonitor = nil }
-    private func handleKey(_ code: UInt16, modified: Bool) -> Bool {
+    private func handleKey(_ code: UInt16, modified: Bool, commandOnly: Bool) -> Bool {
         if code == 53 { DispatchQueue.main.async { [weak self] in self?.dismiss() }; return true }
+        if commandOnly, !panel.state.options.isEmpty {
+            if code == 8 { copySelected(); return true }
+            if code == 15 {
+                DispatchQueue.main.async { [weak self] in self?.beginSuggestions(refresh: true) }
+                return true
+            }
+        }
         guard !modified else { dismiss(); return false }
         let options = panel.state.options
         if !options.isEmpty {
@@ -295,19 +340,60 @@ final class AppController: NSObject, NSApplicationDelegate {
         dismiss(); return false
     }
     private func accept(_ index: Int) {
-        guard let input, let template, panel.state.options.indices.contains(index) else { return }
+        guard insertion == nil, panel.state.canInsert,
+              let input, let template, panel.state.options.indices.contains(index) else { return }
         let replacement = panel.state.options[index]
         // Stop intercepting before posting any insertion events.
-        stopKeyboard(); panel.hide(); highlight.hide(); request?.cancel(); request = nil
-        do {
-            guard matches(input) else { throw AccessibilityBridgeError.changedText }
-            if let external = input.external { try accessibility.replace(range: template.range, with: replacement, in: external) }
-            else if let view = input.local {
-                guard view.shouldChangeText(in: template.range, replacementString: replacement) else { throw AccessibilityBridgeError.replacementUnavailable }
-                view.insertText(replacement, replacementRange: template.range)
+        stopKeyboard(); highlight.hide(); request?.cancel(); request = nil
+        panel.state.selected = index
+        panel.setInserting(true)
+        let id = UUID(); requestID = id
+        insertion = Task { @MainActor [weak self] in
+            guard let self else { return }
+            do {
+                try Task.checkCancellation()
+                guard self.matches(input) else { throw AccessibilityBridgeError.changedText }
+                if let external = input.external {
+                    try await self.accessibility.replace(range: template.range, with: replacement, in: external)
+                } else if let view = input.local {
+                    // insertText performs the delegate check and undo registration
+                    // itself. Calling shouldChangeText first registers the edit twice.
+                    view.insertText(replacement, replacementRange: template.range)
+                    let expected = (input.text as NSString).replacingCharacters(in: template.range, with: replacement)
+                    guard view.string.utf16.elementsEqual(expected.utf16) else {
+                        throw view.string.utf16.elementsEqual(input.text.utf16)
+                            ? AccessibilityBridgeError.replacementUnavailable
+                            : AccessibilityBridgeError.replacementUnconfirmed
+                    }
+                }
+                self.insertion = nil
+                guard self.requestID == id else { return }
+                self.dismiss()
+            } catch {
+                self.insertion = nil
+                guard self.requestID == id else { return }
+                // A failed attempt may have selected the braces. Rebind only when
+                // the same editor still contains exactly the original text.
+                let current = try? self.capture()
+                // An unconfirmed write can still be pending in the target app.
+                // Keep its candidates copyable, without offering an immediate retry.
+                let uncertain = (error as? AccessibilityBridgeError) == .replacementUnconfirmed
+                let retryInput = uncertain ? nil : current.flatMap { self.sameEditor($0, input) && $0.text.utf16.elementsEqual(input.text.utf16) ? $0 : nil }
+                self.input = retryInput
+                let recovery = retryInput == nil
+                    ? "Your options are kept below. Copy a suggestion, or return to the braces and reopen Lacuna."
+                    : "Your options are kept below. Try again, or copy a suggestion."
+                self.panel.showInsertionError(error.localizedDescription + "\n" + recovery, canInsert: retryInput != nil)
+                self.startKeyboard(local: retryInput?.local != nil || NSApp.isActive)
             }
-            dismiss()
-        } catch { dismiss(); showMessage(error.localizedDescription, anchor: input.anchor) }
+        }
+    }
+    private func copySelected() {
+        guard insertion == nil, panel.state.options.indices.contains(panel.state.selected) else { return }
+        let value = panel.state.options[panel.state.selected]
+        let pasteboard = NSPasteboard.general
+        pasteboard.clearContents()
+        pasteboard.setString(value, forType: .string)
     }
     private func showMessage(_ text: String, anchor: CGRect?) {
         panel.show(instruction: "", anchor: anchor, message: text)
@@ -318,6 +404,9 @@ final class AppController: NSObject, NSApplicationDelegate {
     }
     private func dismiss() {
         requestID = UUID(); request?.cancel(); request = nil
+        // Keep the task reference until it finishes any already-posted paste and
+        // clipboard restoration. No new insertion may overlap that cleanup.
+        insertion?.cancel()
         input = nil; template = nil
         dismissWork?.cancel(); dismissWork = nil
         stopKeyboard(); panel.hide(); panel.state.options = []; highlight.hide()

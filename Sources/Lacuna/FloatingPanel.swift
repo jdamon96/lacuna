@@ -13,9 +13,21 @@ final class SuggestionState: ObservableObject {
     @Published var selected = 0
     @Published var message = ""
     @Published var loading = false
+    @Published var isInserting = false
+    @Published var canInsert = true
+    @Published var maximumPanelHeight: CGFloat = 490
     var choose: ((Int) -> Void)?
     var dismiss: (() -> Void)?
+    var copySelected: (() -> Void)?
+    var regenerate: (() -> Void)?
     var navigate: ((_ direction: Int, _ jump: Bool) -> Void)?
+}
+
+private struct SuggestionButtonStyle: ButtonStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        // An option remains readable and copyable even when insertion is disabled.
+        configuration.label.opacity(configuration.isPressed ? 0.8 : 1)
+    }
 }
 
 private struct SuggestionRow: View {
@@ -25,7 +37,11 @@ private struct SuggestionRow: View {
     let width: CGFloat
 
     var body: some View {
-        Button { state.choose?(index) } label: {
+        Button {
+            guard !state.isInserting else { return }
+            if state.canInsert { state.choose?(index) }
+            else { state.selected = index }
+        } label: {
             HStack(alignment: .top, spacing: 12) {
                 Text("\(index + 1)")
                     .font(.system(size: 12, weight: .medium, design: .monospaced))
@@ -38,7 +54,8 @@ private struct SuggestionRow: View {
             .padding(11).contentShape(Rectangle())
             .background(index == state.selected ? Color.indigo.opacity(0.11) : Color.primary.opacity(0.025), in: RoundedRectangle(cornerRadius: 9))
             .overlay(RoundedRectangle(cornerRadius: 9).stroke(index == state.selected ? Color.indigo.opacity(0.25) : .clear, lineWidth: 1))
-        }.buttonStyle(.plain)
+        }.buttonStyle(SuggestionButtonStyle())
+        .disabled(state.isInserting)
         .accessibilityLabel("Option \(index + 1): \(option)")
         .frame(width: width)
     }
@@ -138,12 +155,31 @@ private struct SuggestionList: NSViewRepresentable {
     }
     func sizeThatFits(_ proposal: ProposedViewSize, nsView: SuggestionScrollView, context: Context) -> NSSize? {
         let width = proposal.width.flatMap { $0.isFinite ? $0 : nil } ?? 398
-        return NSSize(width: width, height: nsView.fittingHeight(for: max(1, width)))
+        let maximumHeight = proposal.height.flatMap { $0.isFinite ? max(0, $0) : nil } ?? 330
+        return NSSize(width: width, height: min(maximumHeight, nsView.fittingHeight(for: max(1, width))))
     }
 }
 
 struct SuggestionView: View {
     @ObservedObject var state: SuggestionState
+
+    private var suggestionHeight: CGFloat {
+        // Reserve enough room for the entire insertion status and its copy action.
+        // The list compresses instead of pushing its keyboard footer off-screen.
+        let instruction = min(32, textHeight(state.instruction))
+        let status = state.message.isEmpty ? 0 : textHeight(state.message) + 44
+        let chrome = 20 + instruction + 32 + 36 + (state.isInserting ? 17 : 14)
+        return min(330, max(60, state.maximumPanelHeight - chrome - status))
+    }
+
+    private func textHeight(_ text: String) -> CGFloat {
+        guard !text.isEmpty else { return 0 }
+        return ceil((text as NSString).boundingRect(
+            with: NSSize(width: 398, height: CGFloat.greatestFiniteMagnitude),
+            options: [.usesLineFragmentOrigin, .usesFontLeading],
+            attributes: [.font: NSFont.systemFont(ofSize: 13)]).height)
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             HStack(spacing: 9) {
@@ -155,17 +191,49 @@ struct SuggestionView: View {
                 }.buttonStyle(.plain).accessibilityLabel("Dismiss suggestions")
             }
             Text(state.instruction).font(.system(size: 13)).foregroundStyle(.secondary).lineLimit(2)
-            if state.loading {
+            if state.loading && state.options.isEmpty {
                 HStack(spacing: 10) {
                     ProgressView().controlSize(.small)
                     Text("Finding the words…").font(.system(size: 13))
                 }.padding(.vertical, 14)
+            }
+            if !state.options.isEmpty {
+                if !state.message.isEmpty {
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text(state.message).font(.system(size: 13))
+                            .fixedSize(horizontal: false, vertical: true)
+                        Button { state.copySelected?() } label: {
+                            HStack(spacing: 8) {
+                                Text("Copy selected")
+                                Text("⌘C").foregroundStyle(.secondary)
+                            }
+                        }.controlSize(.small).disabled(state.isInserting)
+                    }
+                }
+                // Keep this view in place while status changes so AppKit retains
+                // its document, selected option, and current reading position.
+                SuggestionList(state: state).frame(maxHeight: suggestionHeight)
+                HStack(spacing: 8) {
+                    if state.isInserting {
+                        ProgressView().controlSize(.mini)
+                        Text("Inserting…")
+                    } else {
+                        Text(state.canInsert
+                             ? "1–3 insert  ·  ↑↓ read  ·  tab next  ·  ↵ accept"
+                             : "↑↓ read  ·  ⌘C copy  ·  esc dismiss")
+                    }
+                    Spacer(minLength: 0)
+                    Button { state.regenerate?() } label: {
+                        HStack(spacing: 3) {
+                            Image(systemName: "arrow.clockwise")
+                            Text("⌘R")
+                        }
+                    }.buttonStyle(.plain).disabled(state.isInserting)
+                        .help("New suggestions (⌘R)")
+                        .accessibilityLabel("New suggestions")
+                }.font(.system(size: 11)).foregroundStyle(.secondary)
             } else if !state.message.isEmpty {
                 Text(state.message).font(.system(size: 13)).fixedSize(horizontal: false, vertical: true).padding(.vertical, 8)
-            } else {
-                SuggestionList(state: state).frame(maxHeight: 330)
-                Text("1–3 insert  ·  ↑↓ read  ·  tab next  ·  ↵ accept")
-                    .font(.system(size: 11)).foregroundStyle(.secondary)
             }
         }
         .padding(16).frame(width: 430, alignment: .leading)
@@ -191,19 +259,34 @@ final class FloatingPanel {
     }
     func show(instruction: String, anchor: CGRect?, loading: Bool = false, options: [String] = [], message: String = "") {
         state.instruction = instruction; state.loading = loading; state.options = options
-        state.message = message; state.selected = 0; self.anchor = anchor
-        position()
+        state.message = message; state.selected = 0; state.isInserting = false; state.canInsert = true
+        self.anchor = anchor
+        refreshLayout()
         panel.orderFrontRegardless()
-        DispatchQueue.main.async { [weak self] in self?.position() }
+    }
+    func setInserting(_ inserting: Bool) {
+        state.isInserting = inserting
+        refreshLayout()
+    }
+    func showInsertionError(_ message: String, canInsert: Bool) {
+        state.message = message; state.canInsert = canInsert; state.isInserting = false
+        refreshLayout()
+        panel.orderFrontRegardless()
     }
     func hide() { panel.orderOut(nil) }
+    private func refreshLayout() {
+        position()
+        DispatchQueue.main.async { [weak self] in self?.position() }
+    }
     private func position() {
         guard let view = panel.contentView else { return }
-        view.layoutSubtreeIfNeeded()
-        let height = min(490, max(125, view.fittingSize.height))
         let converted = anchor.map(Self.appKitRect)
         let screen = NSScreen.screens.first { screen in converted.map { screen.frame.intersects($0) } ?? screen.frame.contains(NSEvent.mouseLocation) } ?? NSScreen.main
         let visible = screen?.visibleFrame ?? CGRect(x: 0, y: 0, width: 1000, height: 800)
+        let maximumHeight = min(490, max(125, visible.height - 24))
+        if state.maximumPanelHeight != maximumHeight { state.maximumPanelHeight = maximumHeight }
+        view.layoutSubtreeIfNeeded()
+        let height = min(maximumHeight, max(125, view.fittingSize.height))
         let rect = converted ?? CGRect(x: visible.midX - 215, y: visible.midY + 130, width: 1, height: 20)
         let x = min(max(visible.minX + 12, rect.minX), visible.maxX - 442)
         var y = rect.minY - height - 8

@@ -19,13 +19,13 @@ Grant **Accessibility** access when prompted, then open Lacuna’s menu bar sett
 3. Press **⇧⌘K** to generate three options using the surrounding text.
 4. Press **1**, **2**, or **3** to replace the braces with your choice. **Escape** dismisses the suggestions.
 
-Use **↑/↓** to scroll long suggestions, **Tab** to move to the next option, and **Return** to accept the selected option.
+Use **↑/↓** to scroll long suggestions, **Tab** to move to the next option, and **Return** to accept the selected option. Reopening an unchanged template brings back its previous options. Press **⌘R** in the popup for new suggestions, or **⌘C** to copy the selected option. If insertion fails, the options stay open.
 
 Use single braces. You can change the shortcut, provider, and model in settings. OpenAI and Anthropic use their respective native APIs. Choose **OpenAI-compatible** to configure a custom or local server with a Chat Completions API.
 
 ## Privacy and compatibility
 
-Brace detection happens locally in the focused text field. Text is sent directly to your configured provider only when you request suggestions. API keys stay in macOS Keychain. There is no Lacuna server or analytics.
+Brace detection happens locally in the focused text field. Text is sent directly to your configured provider only when you request suggestions. API keys stay in macOS Keychain. The last 20 sets of suggestions are kept in memory until you quit or save settings; prompts and suggestions are never saved to disk. There is no Lacuna server or analytics.
 
 Lacuna uses macOS Accessibility APIs. Support depends on how each app exposes its editable text and text positions; some web editors, terminals, and custom controls may not work. Read-only pages and secure password fields are excluded. Try TextEdit in plain-text mode first.
 
@@ -41,7 +41,7 @@ cd lacuna
 
 This builds, installs to `~/Applications`, and opens Lacuna. Use `./scripts/build.sh` to build only, `swift test` to run tests, or `./scripts/release.sh` to create a universal DMG and ZIP in `dist/` (requires full Xcode).
 
-Release scripts default to version `0.2.0`, build `2`; override them with `--version` and `BUILD_NUMBER`. Optional `SIGNING_IDENTITY` and `NOTARY_PROFILE` environment variables enable Developer ID signing and notarization with your existing credentials. Nothing is published automatically.
+Release scripts default to version `0.2.2`, build `4`; override them with `--version` and `BUILD_NUMBER`. Optional `SIGNING_IDENTITY` and `NOTARY_PROFILE` environment variables enable Developer ID signing and notarization with your existing credentials. Nothing is published automatically.
 
 ## License
 
