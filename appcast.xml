@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="utf-8" standalone="yes"?><!-- sparkle-sign-warning:
+IMPORTANT: This file was signed by Sparkle. Any modifications to this file requires re-signing this file with generate_appcast or sign_update! The signed signature will be embedded at the end of this file.
+--><rss xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle" version="2.0">
+  <channel>
+    <title>Lacuna updates</title>
+    <link>https://github.com/jdamon96/lacuna</link>
+    <description>Updates for Lacuna for macOS.</description>
+    <language>en</language>
+    <item>
+      <title>Lacuna 0.3.0</title>
+      <link>https://github.com/jdamon96/lacuna/releases/tag/v0.3.0</link>
+      <sparkle:version>5</sparkle:version>
+      <sparkle:shortVersionString>0.3.0</sparkle:shortVersionString>
+      <sparkle:minimumSystemVersion>13.0.0</sparkle:minimumSystemVersion>
+      <pubDate>Tue, 06 Oct 2026 04:30:08 +0000</pubDate>
+      <description sparkle:format="plain-text">Lacuna can now update itself.
+
+Choose Check for Updates… in the menu to download and install new releases, then relaunch automatically. You can also opt into automatic background checks from the menu.
+
+Updates preserve settings and Keychain entries. Both the update feed and downloaded archives are verified with Lacuna's update-signing key.
+
+This is the first version with an updater. Versions 0.2.x need one manual installation to get it.</description>
+      <enclosure url="https://github.com/jdamon96/lacuna/releases/download/v0.3.0/Lacuna-0.3.0-universal.zip" sparkle:edSignature="iWeHabNLnKfeWowUgSYeWu9zRftJe20vxWi2zR1Jfc+twC8NCL0c+42Y5lhcBRT+7YosFj8kRmLiflTK6SwHCQ==" length="1949017" type="application/octet-stream"></enclosure>
+    </item>
+  </channel>
+</rss><!-- sparkle-signatures:
+edSignature: u5p50CJmh5fHFS1It1e0bNnkM4wGIDmNaNcpPobwGIemz7bP0Wfhxfq3Mjx5MKQE+Cl0U4SONKEilTc+V0KyAQ==
+length: 1746
+-->
