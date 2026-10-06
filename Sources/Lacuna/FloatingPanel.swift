@@ -301,39 +301,63 @@ final class FloatingPanel {
     }
 }
 
+private final class BraceHighlightView: NSView {
+    var fragments: [CGRect] = []
+    var style: BraceHighlight.Style = .complete
+
+    override func draw(_ dirtyRect: NSRect) {
+        super.draw(dirtyRect)
+        for rect in fragments {
+            switch style {
+            case .opening:
+                NSColor.systemIndigo.withAlphaComponent(0.8).setFill()
+                NSBezierPath(roundedRect: rect, xRadius: 1, yRadius: 1).fill()
+            case .complete:
+                let path = NSBezierPath(roundedRect: rect.insetBy(dx: 0.5, dy: 0.5), xRadius: 4, yRadius: 4)
+                NSColor.systemIndigo.withAlphaComponent(0.08).setFill()
+                path.fill()
+                NSColor.systemIndigo.withAlphaComponent(0.5).setStroke()
+                path.lineWidth = 1
+                path.stroke()
+            }
+        }
+    }
+}
+
 final class BraceHighlight {
     enum Style { case opening, complete }
     private let panel: PassivePanel
+    private let view = BraceHighlightView()
     init() {
         panel = PassivePanel(contentRect: .zero, styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
         panel.level = .floating; panel.backgroundColor = .clear; panel.isOpaque = false
         panel.ignoresMouseEvents = true; panel.hasShadow = false; panel.hidesOnDeactivate = false
         panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .ignoresCycle]
-        let view = NSView(); view.wantsLayer = true
-        view.layer?.backgroundColor = NSColor.systemIndigo.withAlphaComponent(0.08).cgColor
-        view.layer?.borderColor = NSColor.systemIndigo.withAlphaComponent(0.5).cgColor
-        view.layer?.borderWidth = 1; view.layer?.cornerRadius = 4
         panel.contentView = view
     }
-    func show(_ rect: CGRect, style: Style = .complete) {
-        guard rect.width > 0, rect.height > 0, rect.height < 180 else { hide(); return }
-        let frame = FloatingPanel.appKitRect(rect)
-        let layer = panel.contentView?.layer
-        switch style {
-        case .opening:
-            // A quiet underline at the opening brace acknowledges typing without
-            // covering unfinished text or looking like a ready-to-fill selection.
-            layer?.backgroundColor = NSColor.systemIndigo.withAlphaComponent(0.8).cgColor
-            layer?.borderWidth = 0
-            layer?.cornerRadius = 1
-            panel.setFrame(CGRect(x: frame.minX - 1, y: frame.minY - 2,
-                                  width: max(7, frame.width + 2), height: 2), display: true)
-        case .complete:
-            layer?.backgroundColor = NSColor.systemIndigo.withAlphaComponent(0.08).cgColor
-            layer?.borderWidth = 1
-            layer?.cornerRadius = 4
-            panel.setFrame(frame.insetBy(dx: -2, dy: -2), display: true)
+    func show(_ rects: [CGRect], style: Style = .complete) {
+        let frames = rects.compactMap { rect -> CGRect? in
+            guard rect.origin.x.isFinite, rect.origin.y.isFinite,
+                  rect.width.isFinite, rect.height.isFinite,
+                  rect.width > 0, rect.height > 0, rect.height < 180 else { return nil }
+            let frame = FloatingPanel.appKitRect(rect)
+            switch style {
+            case .opening:
+                // A quiet underline acknowledges an unfinished expression.
+                return CGRect(x: frame.minX - 1, y: frame.minY - 2,
+                              width: max(7, frame.width + 2), height: 2)
+            case .complete:
+                return frame.insetBy(dx: -2, dy: -2)
+            }
         }
+        guard let first = frames.first else { hide(); return }
+        let bounds = frames.dropFirst().reduce(first) { $0.union($1) }
+        panel.setFrame(bounds, display: false)
+        // One passive window, with a separate contour around each visual line.
+        // Leave the space before/after a wrapped fragment completely transparent.
+        view.fragments = frames.map { $0.offsetBy(dx: -bounds.minX, dy: -bounds.minY) }
+        view.style = style
+        view.needsDisplay = true
         panel.orderFrontRegardless()
     }
     func hide() { panel.orderOut(nil) }

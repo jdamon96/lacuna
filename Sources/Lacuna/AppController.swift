@@ -217,6 +217,12 @@ final class AppController: NSObject, NSApplicationDelegate {
         return nil
     }
 
+    private func highlightBounds(_ range: NSRange, in input: CapturedInput) -> [CGRect] {
+        if let external = input.external { return accessibility.highlightBounds(for: range, in: external) }
+        if let local = input.local { return NativeTextGeometry.highlightBounds(for: range, in: local) }
+        return []
+    }
+
     private func isShortcut(_ event: NSEvent) -> Bool {
         guard let candidate = Shortcut.from(event) else { return false }
         return candidate.keyCode == preferences.shortcut.keyCode && candidate.modifiers == preferences.shortcut.modifiers
@@ -294,13 +300,11 @@ final class AppController: NSObject, NSApplicationDelegate {
         guard !panel.isVisible, preferences.highlights, let candidate = try? capture() else { highlight.hide(); return }
         // The expression being written takes priority over a completed template elsewhere.
         if let opening = BraceTemplate.pendingOpening(in: candidate.text, selection: candidate.selection) {
-            if let rect = bounds(opening, in: candidate) { highlight.show(rect, style: .opening) }
-            else { highlight.hide() }
+            highlight.show(highlightBounds(opening, in: candidate), style: .opening)
             return
         }
-        guard let template = BraceTemplate.find(in: candidate.text, selection: candidate.selection),
-              let rect = bounds(template.range, in: candidate) else { highlight.hide(); return }
-        highlight.show(rect)
+        guard let template = BraceTemplate.find(in: candidate.text, selection: candidate.selection) else { highlight.hide(); return }
+        highlight.show(highlightBounds(template.range, in: candidate))
     }
 
     private func startKeyboard(local: Bool) {

@@ -4,7 +4,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 for ARGUMENT in "$@"; do
     if [[ "$ARGUMENT" == "-h" || "$ARGUMENT" == "--help" ]]; then
-        echo "Usage: scripts/install.sh [--universal] [--version 0.3.0]"
+        echo "Usage: scripts/install.sh [--universal] [--version 0.3.1]"
         echo "Build, install to ~/Applications, and open Lacuna."
         exit 0
     fi

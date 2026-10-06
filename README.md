@@ -45,7 +45,7 @@ cd lacuna
 
 This builds, installs to `~/Applications`, and opens Lacuna. Use `./scripts/build.sh` to build only, `swift test` to run tests, or `./scripts/release.sh` to create a universal DMG and ZIP in `dist/` (requires full Xcode).
 
-Release scripts default to version `0.3.0`, build `5`; override them with `--version` and `BUILD_NUMBER`. Releases require the Sparkle signing key; ordinary builds do not. See [Publishing releases](docs/RELEASING.md) for signing and updating the feed. Nothing is published automatically.
+Release scripts default to version `0.3.1`, build `6`; override them with `--version` and `BUILD_NUMBER`. Releases require the Sparkle signing key; ordinary builds do not. See [Publishing releases](docs/RELEASING.md) for signing and updating the feed. Nothing is published automatically.
 
 ## License
 

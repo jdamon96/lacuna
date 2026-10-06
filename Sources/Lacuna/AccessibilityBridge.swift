@@ -111,6 +111,65 @@ final class AccessibilityBridge {
         return rect
     }
 
+    /// One rectangle per visual text row, in AX global top-left coordinates.
+    /// Keep this separate from `bounds(for:)`, which is also used as a chooser
+    /// anchor and can intentionally represent just the first visible row.
+    func highlightBounds(for range: NSRange, in snapshot: FocusedTextSnapshot) -> [CGRect] {
+        guard valid(range, in: snapshot.text), range.length > 0 else { return [] }
+        let deadline = ProcessInfo.processInfo.systemUptime + 0.08
+        var remainingCalls = 80
+        var supportsLines = true
+        // A decorative highlight must not turn a slow editor into long, repeated
+        // synchronous IPC stalls. The normal capture/insertion timeout remains.
+        AXUIElementSetMessagingTimeout(snapshot.element, 0.025)
+        defer { AXUIElementSetMessagingTimeout(snapshot.element, 0.3) }
+        var visibleTarget = range
+        remainingCalls -= 1
+        if let value = axValue(attribute(kAXVisibleCharacterRangeAttribute, on: snapshot.element), type: .cfRange) {
+            var visible = CFRange()
+            if AXValueGetValue(value, .cfRange, &visible), visible.location >= 0, visible.length >= 0 {
+                let visibleRange = NSRange(location: visible.location, length: visible.length)
+                if valid(visibleRange, in: snapshot.text) {
+                    visibleTarget = NSIntersectionRange(range, visibleRange)
+                    guard visibleTarget.length > 0 else { return [] }
+                }
+            }
+        }
+        func canQuery() -> Bool {
+            remainingCalls > 0 && ProcessInfo.processInfo.systemUptime < deadline
+        }
+        func query(_ name: String, parameter: CFTypeRef) -> CFTypeRef? {
+            guard canQuery() else { return nil }
+            remainingCalls -= 1
+            var value: CFTypeRef?
+            guard AXUIElementCopyParameterizedAttributeValue(snapshot.element, name as CFString,
+                                                             parameter, &value) == .success else { return nil }
+            return value
+        }
+        let rectangles = HighlightLineGeometry.rectangles(in: snapshot.text, range: visibleTarget, lineRange: { index in
+            guard supportsLines else { return nil }
+            guard let line = query(kAXLineForIndexParameterizedAttribute, parameter: NSNumber(value: index)) as? NSNumber,
+                  line.intValue >= 0,
+                  let value = self.axValue(query(kAXRangeForLineParameterizedAttribute, parameter: line), type: .cfRange) else {
+                supportsLines = false
+                return nil
+            }
+            var lineRange = CFRange()
+            guard AXValueGetValue(value, .cfRange, &lineRange), lineRange.location >= 0, lineRange.length > 0 else { return nil }
+            return NSRange(location: lineRange.location, length: lineRange.length)
+        }, bounds: { range in
+            guard let parameter = self.axRange(range),
+                  let value = self.axValue(query(kAXBoundsForRangeParameterizedAttribute, parameter: parameter), type: .cgRect) else { return nil }
+            var rect = CGRect.zero
+            return AXValueGetValue(value, .cgRect, &rect) && rect.isUsableAXFrame ? rect : nil
+        }, shouldContinue: canQuery)
+        guard let field = snapshot.fieldFrame, field.isUsableAXFrame else { return rectangles }
+        return rectangles.compactMap {
+            let visible = $0.intersection(field)
+            return !visible.isNull && visible.width > 0 && visible.height > 0 ? visible : nil
+        }
+    }
+
     /// Only the requested UTF-16 range is replaced. Never sets the whole field's
     /// value, which can destroy rich text, editor state, or unrelated user edits.
     @MainActor func replace(range: NSRange, with replacement: String, in snapshot: FocusedTextSnapshot) async throws {
