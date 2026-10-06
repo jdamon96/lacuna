@@ -7,6 +7,18 @@ IMPORTANT: This file was signed by Sparkle. Any modifications to this file requi
     <description>Updates for Lacuna for macOS.</description>
     <language>en</language>
     <item>
+      <title>Lacuna 0.3.1</title>
+      <link>https://github.com/jdamon96/lacuna/releases/tag/v0.3.1</link>
+      <sparkle:version>6</sparkle:version>
+      <sparkle:shortVersionString>0.3.1</sparkle:shortVersionString>
+      <sparkle:minimumSystemVersion>13.0.0</sparkle:minimumSystemVersion>
+      <pubDate>Tue, 06 Oct 2026 15:30:41 +0000</pubDate>
+      <description sparkle:format="plain-text">Highlights now follow brace expressions across wrapped lines and explicit line breaks, including the Try Lacuna editor. Each visible line gets its own outline, without covering unrelated text between line fragments.
+
+Highlights also stay within the visible text field when scrolling. Regression checks cover resizing, long expressions, Unicode, and both macOS text layout engines.</description>
+      <enclosure url="https://github.com/jdamon96/lacuna/releases/download/v0.3.1/Lacuna-0.3.1-universal.zip" sparkle:edSignature="/L2mToMKNzQ7eeAKDRst4xBLzYQhbOxVol5zbAWSOllbZlzTR5DFOxB6a/mXtMtEZW0JFT4TdKqbiZUhq90ZBg==" length="1975908" type="application/octet-stream"></enclosure>
+    </item>
+    <item>
       <title>Lacuna 0.3.0</title>
       <link>https://github.com/jdamon96/lacuna/releases/tag/v0.3.0</link>
       <sparkle:version>5</sparkle:version>
@@ -24,6 +36,6 @@ This is the first version with an updater. Versions 0.2.x need one manual instal
     </item>
   </channel>
 </rss><!-- sparkle-signatures:
-edSignature: u5p50CJmh5fHFS1It1e0bNnkM4wGIDmNaNcpPobwGIemz7bP0Wfhxfq3Mjx5MKQE+Cl0U4SONKEilTc+V0KyAQ==
-length: 1746
+edSignature: qO0q0RDAZrSMUKPyBU7t5lb1+iiUIhVTrGM3DBPdGGp62CD+9zZKwb0cAr7WDZ826hE078LjxWjKlj6q+r1bDw==
+length: 2845
 -->
