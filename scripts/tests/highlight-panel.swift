@@ -10,6 +10,11 @@ private enum HighlightPanelChecks {
         setbuf(stdout, nil)
         let app = NSApplication.shared
         app.setActivationPolicy(.accessory)
+        let visible = CGRect(x: -1_000, y: 100, width: 1_000, height: 800)
+        let topField = CGRect(x: -30, y: 865, width: 30, height: 30)
+        let badge = BraceHighlight.fieldBadgeFrame(for: topField, size: CGSize(width: 160, height: 22), visibleFrame: visible)
+        precondition(visible.contains(badge) && badge.maxY < topField.minY,
+                     "A field at the screen's top right needs its badge below and inside that screen")
         let highlight = BraceHighlight()
         guard let panel = app.windows.first(where: { $0 is PassivePanel }),
               let view = panel.contentView else { fatalError("Missing production highlight panel") }
@@ -135,11 +140,75 @@ private enum HighlightPanelChecks {
         checks.append {
             expectAutomaticDraw()
             expectContours(snapshot(), rects: input, active: true)
+            priorDraws = screenDraws
+            highlight.show(regions: [
+                .init(rects: [input[0]], style: .complete),
+                .init(rects: [input[1]], style: .active),
+                .init(rects: [CGRect(x: -9_920, y: -9_968, width: 7, height: 22)], style: .opening)
+            ])
+        }
+        func center(of ax: CGRect) -> CGPoint {
+            let frame = FloatingPanel.appKitRect(ax)
+            return CGPoint(x: frame.midX - panel.frame.minX, y: frame.midY - panel.frame.minY)
+        }
+        checks.append {
+            expectAutomaticDraw()
+            let bitmap = snapshot()
+            let complete = alpha(bitmap, at: center(of: input[0]))
+            let active = alpha(bitmap, at: center(of: input[1]))
+            precondition(complete > 0.05 && complete < 0.12 && active > 0.12,
+                         "The active phrase must be stronger without hiding a separate complete phrase")
+            let opening = FloatingPanel.appKitRect(CGRect(x: -9_920, y: -9_968, width: 7, height: 22))
+            let underline = CGPoint(x: opening.midX - panel.frame.minX, y: opening.minY - 1 - panel.frame.minY)
+            precondition(alpha(bitmap, at: underline) > 0.75,
+                         "An opening underline must coexist with complete and active contours")
+            priorDraws = screenDraws
+            highlight.show(regions: [
+                .init(rects: [input[0]], style: .active),
+                .init(rects: [input[1]], style: .complete)
+            ])
+        }
+        let field = CGRect(x: -10_100, y: -10_020, width: 400, height: 120)
+        checks.append {
+            expectAutomaticDraw()
+            let bitmap = snapshot()
+            precondition(alpha(bitmap, at: center(of: input[0])) > 0.12)
+            let other = alpha(bitmap, at: center(of: input[1]))
+            precondition(other > 0.05 && other < 0.12,
+                         "Changing the active phrase must update both styles in the reused window")
+            priorDraws = screenDraws
+            highlight.show(regions: [], fieldIndicator: .init(frame: field, title: "Lacuna · 2 phrases"))
+        }
+        checks.append {
+            expectAutomaticDraw()
+            let bitmap = snapshot()
+            precondition(alpha(bitmap, at: center(of: field)) == 0,
+                         "A field-level indicator must not paint a guessed highlight inside the text field")
+            let converted = FloatingPanel.appKitRect(field)
+            let border = CGPoint(x: converted.midX - panel.frame.minX, y: converted.minY - 1 - panel.frame.minY)
+            precondition(alpha(bitmap, at: border) > 0.3, "The focused field needs a visible outline")
+            precondition(panel.frame.maxY > converted.maxY + 20, "The fallback needs its own attached badge")
+            priorDraws = screenDraws
+            highlight.show(regions: [.init(rects: [input[0]], style: .complete)],
+                           fieldIndicator: .init(frame: field, title: "Lacuna · 2 phrases"))
+        }
+        checks.append {
+            expectAutomaticDraw()
+            let bitmap = snapshot()
+            precondition(alpha(bitmap, at: center(of: input[0])) > 0.05,
+                         "Partial geometry must keep its precise contour alongside the field indicator")
+            precondition(alpha(bitmap, at: center(of: input[1])) == 0,
+                         "A phrase with missing bounds must not receive guessed coordinates")
+            show([input[0]])
+        }
+        checks.append {
+            expectAutomaticDraw()
+            precondition(panel.frame.size == CGSize(width: 144, height: 26), "Precise geometry must clear the stale fallback badge")
             highlight.show([])
             precondition(!panel.isVisible, "Empty geometry must clear a stale highlight")
             method_setImplementation(drawMethod, originalImplementation)
             imp_removeBlock(observer)
-            print("Highlight panel checks passed: automatic display, complete/opening/active styles, passive focus, fragments, resize/reuse, tall highlights, invalid geometry, hide/reopen.")
+            print("Highlight panel checks passed: automatic display, simultaneous complete/opening/active styles, active changes, precise/partial/field fallback cues, passive focus, fragments, resize/reuse, tall highlights, invalid geometry, hide/reopen.")
             app.stop(nil)
             app.postEvent(NSEvent.otherEvent(with: .applicationDefined, location: .zero,
                           modifierFlags: [], timestamp: 0, windowNumber: 0, context: nil,

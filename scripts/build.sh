@@ -4,16 +4,16 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
-VERSION="${VERSION:-0.4.0}"
-BUILD_NUMBER="${BUILD_NUMBER:-7}"
+VERSION="${VERSION:-0.4.1}"
+BUILD_NUMBER="${BUILD_NUMBER:-8}"
 UNIVERSAL=false
 
 usage() {
     cat <<'USAGE'
-Usage: scripts/build.sh [--universal] [--version 0.4.0]
+Usage: scripts/build.sh [--universal] [--version 0.4.1]
 
 Build dist/Lacuna.app for this Mac, or both Apple Silicon and Intel.
-Environment: VERSION (default: 0.4.0), BUILD_NUMBER (default: 7),
+Environment: VERSION (default: 0.4.1), BUILD_NUMBER (default: 8),
 SIGNING_IDENTITY (default: ad-hoc).
 Requires Apple's Command Line Tools or Xcode, with Swift 5.9 or later.
 Universal builds require the full Xcode installation.
@@ -32,7 +32,7 @@ while [[ $# -gt 0 ]]; do
 done
 
 [[ "$(uname -s)" == Darwin ]] || { echo "Lacuna builds require macOS." >&2; exit 1; }
-[[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "VERSION must use the form 0.4.0." >&2; exit 1; }
+[[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "VERSION must use the form 0.4.1." >&2; exit 1; }
 [[ "$BUILD_NUMBER" =~ ^[0-9]+$ ]] || { echo "BUILD_NUMBER must be an integer." >&2; exit 1; }
 
 export MACOSX_DEPLOYMENT_TARGET=13.0

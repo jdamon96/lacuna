@@ -282,6 +282,11 @@ final class FloatingPanel {
         panel.orderFrontRegardless()
     }
     func hide() { panel.orderOut(nil) }
+    func reanchor(_ anchor: CGRect?) {
+        guard self.anchor != anchor else { return }
+        self.anchor = anchor
+        position()
+    }
     private func refreshLayout() {
         position()
         DispatchQueue.main.async { [weak self] in self?.position() }
@@ -310,18 +315,36 @@ final class FloatingPanel {
 }
 
 private final class BraceHighlightView: NSView {
-    var fragments: [CGRect] = []
-    var style: BraceHighlight.Style = .complete
+    struct Fragment {
+        let frame: CGRect
+        let style: BraceHighlight.Style
+    }
+    var fragments: [Fragment] = []
+    var fieldFrame: CGRect?
+    var badgeFrame: CGRect?
+    var badgeTitle = ""
+
+    static let badgeAttributes: [NSAttributedString.Key: Any] = [
+        .font: NSFont.systemFont(ofSize: 11, weight: .medium),
+        .foregroundColor: NSColor.labelColor
+    ]
 
     override func draw(_ dirtyRect: NSRect) {
         super.draw(dirtyRect)
-        for rect in fragments {
-            switch style {
+        if let fieldFrame {
+            let path = NSBezierPath(roundedRect: fieldFrame.insetBy(dx: 0.75, dy: 0.75), xRadius: 6, yRadius: 6)
+            NSColor.systemIndigo.withAlphaComponent(0.45).setStroke()
+            path.lineWidth = 1.5
+            path.stroke()
+        }
+        for fragment in fragments {
+            let rect = fragment.frame
+            switch fragment.style {
             case .opening:
                 NSColor.systemIndigo.withAlphaComponent(0.8).setFill()
                 NSBezierPath(roundedRect: rect, xRadius: 1, yRadius: 1).fill()
             case .complete, .active:
-                let active = style == .active
+                let active = fragment.style == .active
                 let lineWidth: CGFloat = active ? 1.5 : 1
                 let path = NSBezierPath(roundedRect: rect.insetBy(dx: lineWidth / 2, dy: lineWidth / 2), xRadius: 4, yRadius: 4)
                 NSColor.systemIndigo.withAlphaComponent(active ? 0.14 : 0.08).setFill()
@@ -331,11 +354,29 @@ private final class BraceHighlightView: NSView {
                 path.stroke()
             }
         }
+        if let badgeFrame {
+            NSColor.windowBackgroundColor.withAlphaComponent(0.97).setFill()
+            let path = NSBezierPath(roundedRect: badgeFrame, xRadius: 5, yRadius: 5)
+            path.fill()
+            NSColor.systemIndigo.withAlphaComponent(0.55).setStroke()
+            path.lineWidth = 1
+            path.stroke()
+            (badgeTitle as NSString).draw(at: CGPoint(x: badgeFrame.minX + 7, y: badgeFrame.minY + 4),
+                                         withAttributes: Self.badgeAttributes)
+        }
     }
 }
 
 final class BraceHighlight {
     enum Style { case opening, complete, active }
+    struct Region {
+        let rects: [CGRect]
+        let style: Style
+    }
+    struct FieldIndicator {
+        let frame: CGRect
+        let title: String
+    }
     private let panel: PassivePanel
     private let view = BraceHighlightView()
     init() {
@@ -349,29 +390,64 @@ final class BraceHighlight {
         panel.contentView = view
     }
     func show(_ rects: [CGRect], style: Style = .complete) {
-        let frames = rects.compactMap { rect -> CGRect? in
+        show(regions: [Region(rects: rects, style: style)])
+    }
+    func show(regions: [Region], fieldIndicator: FieldIndicator? = nil) {
+        let fragments = regions.flatMap { region in region.rects.compactMap { rect -> BraceHighlightView.Fragment? in
             guard rect.origin.x.isFinite, rect.origin.y.isFinite,
                   rect.width.isFinite, rect.height.isFinite,
                   rect.width > 0, rect.height > 0, rect.height < 180 else { return nil }
             let frame = FloatingPanel.appKitRect(rect)
-            switch style {
+            let contour: CGRect
+            switch region.style {
             case .opening:
                 // A quiet underline acknowledges an unfinished expression.
-                return CGRect(x: frame.minX - 1, y: frame.minY - 2,
-                              width: max(7, frame.width + 2), height: 2)
+                contour = CGRect(x: frame.minX - 1, y: frame.minY - 2,
+                                 width: max(7, frame.width + 2), height: 2)
             case .complete, .active:
-                return frame.insetBy(dx: -2, dy: -2)
+                contour = frame.insetBy(dx: -2, dy: -2)
+            }
+            return BraceHighlightView.Fragment(frame: contour, style: region.style)
+        } }
+        var fieldFrame: CGRect?
+        var badgeFrame: CGRect?
+        if let indicator = fieldIndicator {
+            let frame = indicator.frame
+            if frame.minX.isFinite, frame.minY.isFinite, frame.width.isFinite, frame.height.isFinite,
+               frame.width > 0, frame.height > 0 {
+                let converted = FloatingPanel.appKitRect(frame)
+                fieldFrame = converted.insetBy(dx: -2, dy: -2)
+                let size = (indicator.title as NSString).size(withAttributes: BraceHighlightView.badgeAttributes)
+                // Attach a separate field-level cue above the field; don't draw
+                // a guessed text highlight when the editor exposes no glyph bounds.
+                let visible = NSScreen.screens.first(where: { $0.frame.intersects(converted) })?.visibleFrame
+                badgeFrame = Self.fieldBadgeFrame(for: converted,
+                                                 size: CGSize(width: ceil(size.width) + 14, height: ceil(size.height) + 8),
+                                                 visibleFrame: visible)
             }
         }
+        let frames = fragments.map(\.frame) + [fieldFrame, badgeFrame].compactMap { $0 }
         guard let first = frames.first else { hide(); return }
         let bounds = frames.dropFirst().reduce(first) { $0.union($1) }
         panel.setFrame(bounds, display: false)
-        // One passive window, with a separate contour around each visual line.
-        // Leave the space before/after a wrapped fragment completely transparent.
-        view.fragments = frames.map { $0.offsetBy(dx: -bounds.minX, dy: -bounds.minY) }
-        view.style = style
+        // One passive window draws all phrases, each with its own style. Gaps
+        // between words, lines, and separate expressions stay transparent.
+        view.fragments = fragments.map {
+            BraceHighlightView.Fragment(frame: $0.frame.offsetBy(dx: -bounds.minX, dy: -bounds.minY), style: $0.style)
+        }
+        view.fieldFrame = fieldFrame?.offsetBy(dx: -bounds.minX, dy: -bounds.minY)
+        view.badgeFrame = badgeFrame?.offsetBy(dx: -bounds.minX, dy: -bounds.minY)
+        view.badgeTitle = fieldIndicator?.title ?? ""
         view.needsDisplay = true
         panel.orderFrontRegardless()
+    }
+    static func fieldBadgeFrame(for field: CGRect, size: CGSize, visibleFrame: CGRect?) -> CGRect {
+        var badge = CGRect(x: field.minX, y: field.maxY + 5, width: size.width, height: size.height)
+        guard let visibleFrame else { return badge }
+        if badge.maxY > visibleFrame.maxY { badge.origin.y = field.minY - badge.height - 5 }
+        badge.origin.x = max(visibleFrame.minX, min(badge.minX, visibleFrame.maxX - badge.width))
+        badge.origin.y = max(visibleFrame.minY, min(badge.minY, visibleFrame.maxY - badge.height))
+        return badge
     }
     func hide() { panel.orderOut(nil) }
 }

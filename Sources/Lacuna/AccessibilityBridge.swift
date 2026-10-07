@@ -54,6 +54,7 @@ final class AccessibilityBridge {
     private let system = AXUIElementCreateSystemWide()
     private var replacing = false
     private var pastePreferredProcesses = Set<pid_t>()
+    private var accessibilityEnabledProcesses: [pid_t: Date] = [:]
 
     var isTrusted: Bool { AXIsProcessTrusted() }
 
@@ -75,7 +76,19 @@ final class AccessibilityBridge {
     }
 
     func capture() throws -> FocusedTextSnapshot {
+        try capture(requiresSelection: true)
+    }
+
+    /// Read-only cues do not require the application to expose a writable caret.
+    /// NSNotFound explicitly represents an unavailable selection; callers must
+    /// not use it as a guessed insertion point or pending opening brace.
+    func captureForHighlighting() throws -> FocusedTextSnapshot {
+        try capture(requiresSelection: false)
+    }
+
+    private func capture(requiresSelection: Bool) throws -> FocusedTextSnapshot {
         guard isTrusted else { throw AccessibilityBridgeError.permissionRequired }
+        enableBrowserAccessibilityIfNeeded()
         let element = try focusedElement()
         AXUIElementSetMessagingTimeout(element, 0.3)
         try requireEditable(element)
@@ -88,13 +101,13 @@ final class AccessibilityBridge {
         guard let text = text(of: element) else {
             throw AccessibilityBridgeError.unavailableText
         }
-        guard let selection = selection(of: element), valid(selection, in: text),
-              isSettable(kAXSelectedTextRangeAttribute, on: element) else {
+        guard let selected = AccessibleTextCapturePolicy.selection(selection(of: element),
+            textLength: text.utf16.count, required: requiresSelection) else {
             throw AccessibilityBridgeError.unsupportedSelection
         }
         return FocusedTextSnapshot(
             element: element, pid: pid, text: text,
-            selection: selection, fieldFrame: frame(of: element)
+            selection: selected, fieldFrame: frame(of: element)
         )
     }
 
@@ -115,12 +128,14 @@ final class AccessibilityBridge {
     /// Keep this separate from `bounds(for:)`, which is also used as a chooser
     /// anchor and can intentionally represent just the first visible row.
     func highlightBounds(for range: NSRange, in snapshot: FocusedTextSnapshot) -> [CGRect] {
-        guard valid(range, in: snapshot.text), range.length > 0 else { return [] }
+        highlightBounds(for: [range], in: snapshot).first ?? []
+    }
+
+    /// Input order determines priority, with one shared IPC budget for all ranges.
+    func highlightBounds(for ranges: [NSRange], in snapshot: FocusedTextSnapshot) -> [[CGRect]] {
         let deadline = ProcessInfo.processInfo.systemUptime + 0.08
         var remainingCalls = 80
         var supportsLines = true
-        // Bound the whole operation, rather than requiring every editor to answer
-        // within 25ms. Optional refinement can stop after the first valid bounds.
         func canQuery() -> Bool {
             remainingCalls > 0 && ProcessInfo.processInfo.systemUptime < deadline
         }
@@ -145,25 +160,103 @@ final class AccessibilityBridge {
             defer { AXUIElementSetMessagingTimeout(element, 0.3) }
             return attribute(name, on: element)
         }
-        func rangeBounds(_ range: NSRange, on element: AXUIElement? = nil) -> CGRect? {
-            guard let parameter = axRange(range),
-                  let value = axValue(query(kAXBoundsForRangeParameterizedAttribute, parameter: parameter, on: element), type: .cgRect) else { return nil }
+        func rectangle(_ value: CFTypeRef?) -> CGRect? {
+            guard let value = axValue(value, type: .cgRect) else { return nil }
             var rect = CGRect.zero
             return AXValueGetValue(value, .cgRect, &rect) && rect.isUsableAXFrame ? rect : nil
         }
+        // Never clip new screen coordinates against a frame from before a window
+        // move. If a fresh frame is unavailable, omit clipping rather than reuse it.
+        var currentFrame: CGRect?
+        if let position = axValue(read(kAXPositionAttribute, on: snapshot.element), type: .cgPoint),
+           let size = axValue(read(kAXSizeAttribute, on: snapshot.element), type: .cgSize) {
+            var point = CGPoint.zero
+            var dimensions = CGSize.zero
+            if AXValueGetValue(position, .cgPoint, &point), AXValueGetValue(size, .cgSize, &dimensions) {
+                let candidate = CGRect(origin: point, size: dimensions)
+                if candidate.isUsableAXFrame, candidate.width > 0 { currentFrame = candidate }
+            }
+        }
         func clipped(_ rectangles: [CGRect]) -> [CGRect] {
-            // A zero-width AX field frame is missing geometry, not an empty
-            // clipping region. Glyph bounds can still be valid in such editors.
-            guard let field = snapshot.fieldFrame, field.isUsableAXFrame, field.width > 0 else { return rectangles }
-            return rectangles.compactMap {
-                let visible = $0.intersection(field)
+            rectangles.compactMap { rectangle in
+                let visible = currentFrame.map { rectangle.intersection($0) } ?? rectangle
                 return !visible.isNull && visible.width > 0 && visible.height > 0 ? visible : nil
             }
         }
-        func descendantBounds(_ targetRange: NSRange) -> [CGRect] {
-            // Chromium rich editors can expose value/selection on a container
-            // while range bounds exist only on its static-text descendants.
-            // Never leave the captured focused field or read another text input.
+
+        var attemptedMarkers = false
+        var markerNavigator: AccessibleTextMarkers<AXTextMarker>?
+        var indexedMarkerBase: Int?
+        func marker(_ value: CFTypeRef?) -> AXTextMarker? {
+            guard let value, CFGetTypeID(value) == AXTextMarkerGetTypeID() else { return nil }
+            return unsafeBitCast(value, to: AXTextMarker.self)
+        }
+        func markerString(_ start: AXTextMarker, _ end: AXTextMarker) -> String? {
+            let value = AXTextMarkerRangeCreate(kCFAllocatorDefault, start, end)
+            return query("AXStringForTextMarkerRange", parameter: value) as? String
+        }
+        func prepareMarkers() {
+            guard !attemptedMarkers else { return }
+            attemptedMarkers = true
+            // AXStartTextMarker and AXTextMarkerForIndex can be document-wide.
+            // The element-scoped range plus exact text validation establishes a
+            // field-local coordinate space before any marker geometry is used.
+            guard snapshot.text.utf16.count <= 131_072,
+                  let value = query("AXTextMarkerRangeForUIElement", parameter: snapshot.element),
+                  CFGetTypeID(value) == AXTextMarkerRangeGetTypeID(),
+                  let actual = query("AXStringForTextMarkerRange", parameter: value) as? String,
+                  sameText(actual, snapshot.text) else { return }
+            let fullRange = unsafeBitCast(value, to: AXTextMarkerRange.self)
+            let start = AXTextMarkerRangeCopyStartMarker(fullRange)
+            let end = AXTextMarkerRangeCopyEndMarker(fullRange)
+            markerNavigator = AccessibleTextMarkers(text: snapshot.text, start: start, end: end)
+            // Use O(1) marker indices only if both field endpoints round-trip to
+            // the same opaque markers. Chromium's anchor-local indices fail this
+            // check when markerForIndex instead addresses the document root.
+            if let first = query("AXIndexForTextMarker", parameter: start) as? NSNumber,
+               let last = query("AXIndexForTextMarker", parameter: end) as? NSNumber,
+               first.intValue >= 0, last.intValue >= first.intValue,
+               last.intValue - first.intValue == snapshot.text.utf16.count,
+               let firstAgain = marker(query("AXTextMarkerForIndex", parameter: first)),
+               let lastAgain = marker(query("AXTextMarkerForIndex", parameter: last)),
+               CFEqual(start, firstAgain), CFEqual(end, lastAgain) {
+                indexedMarkerBase = first.intValue
+            }
+        }
+        func markerAt(_ offset: Int) -> AXTextMarker? {
+            if let base = indexedMarkerBase {
+                return marker(query("AXTextMarkerForIndex", parameter: NSNumber(value: base + offset)))
+            }
+            return markerNavigator?.marker(at: offset, move: { current, forward in
+                marker(query(forward ? "AXNextTextMarkerForTextMarker" : "AXPreviousTextMarkerForTextMarker",
+                             parameter: current))
+            }, string: markerString, shouldContinue: canQuery)
+        }
+        func markerBounds(_ range: NSRange) -> CGRect? {
+            prepareMarkers()
+            guard markerNavigator != nil, let start = markerAt(range.location),
+                  let end = markerAt(NSMaxRange(range)) else { return nil }
+            let markerRange = AXTextMarkerRangeCreate(kCFAllocatorDefault, start, end)
+            return rectangle(query("AXBoundsForTextMarkerRange", parameter: markerRange))
+        }
+        var measured = Set<NSRange>()
+        var cached: [NSRange: CGRect] = [:]
+        func rangeBounds(_ range: NSRange, on element: AXUIElement? = nil) -> CGRect? {
+            if element == nil, measured.contains(range) { return cached[range] }
+            guard let parameter = axRange(range) else { return nil }
+            let standard = rectangle(query(kAXBoundsForRangeParameterizedAttribute, parameter: parameter, on: element))
+            let usable = standard.flatMap { range.length == 0 || $0.width > 0 ? $0 : nil }
+            if element == nil {
+                measured.insert(range)
+                cached[range] = usable
+            }
+            return usable
+        }
+        var attemptedDescendants = false
+        var cachedRuns: [(element: AXUIElement, range: NSRange, text: String)] = []
+        func descendantRuns() -> [(element: AXUIElement, range: NSRange, text: String)] {
+            if attemptedDescendants { return cachedRuns }
+            attemptedDescendants = true
             guard let children = read(kAXChildrenAttribute, on: snapshot.element) as? [AXUIElement],
                   children.count <= 48 else { return [] }
             var pending = children.reversed().map { ($0, 1) }
@@ -179,7 +272,10 @@ final class AccessibilityBridge {
                 visited.append(element)
                 if excluded.contains(role) { continue }
                 if role == kAXStaticTextRole {
-                    guard let text = read(kAXValueAttribute, on: element) as? String,
+                    // Some native wrappers put static text in AXTitle. It is only
+                    // accepted when exact, ordered mapping covers the whole field.
+                    let value = read(kAXValueAttribute, on: element) as? String
+                    guard let text = value ?? (read(kAXTitleAttribute, on: element) as? String),
                           let mapped = mapping.append(text) else { return [] }
                     if mapped.length > 0 { runs.append((element, mapped, text)) }
                 } else {
@@ -188,11 +284,13 @@ final class AccessibilityBridge {
                     pending.append(contentsOf: descendants.reversed().map { ($0, depth + 1) })
                 }
             }
-            // Full coverage prevents an omitted duplicate run from making the
-            // next identical phrase appear to be the template's earlier copy.
             guard mapping.isComplete else { return [] }
+            cachedRuns = runs
+            return runs
+        }
+        func descendantBounds(_ targetRange: NSRange) -> [CGRect] {
             var rectangles: [CGRect] = []
-            for run in runs {
+            for run in descendantRuns() {
                 let overlap = NSIntersectionRange(targetRange, run.range)
                 guard overlap.length > 0 else { continue }
                 guard canQuery(), rectangles.count < 16 else { break }
@@ -203,40 +301,51 @@ final class AccessibilityBridge {
             }
             return rectangles
         }
-
-        // Pending opening braces are one composed character. Their AX bounds are
-        // already the complete highlight; visible-range and line APIs add no value.
-        if (snapshot.text as NSString).rangeOfComposedCharacterSequence(at: range.location) == range {
-            if let rect = rangeBounds(range) { return clipped([rect]) }
-            return clipped(descendantBounds(range))
-        }
-
-        var visibleTarget = range
-        // Visible-range metadata is advisory and must not consume the budget for
-        // useful bounds. Some custom editors expose {0,0} for nonempty fields.
-        if let value = axValue(read(kAXVisibleCharacterRangeAttribute, on: snapshot.element, maximumWait: 0.01), type: .cfRange) {
-            var visible = CFRange()
-            if AXValueGetValue(value, .cfRange, &visible), visible.location >= 0, visible.length > 0 {
-                let visibleRange = NSRange(location: visible.location, length: visible.length)
-                if valid(visibleRange, in: snapshot.text) {
-                    visibleTarget = NSIntersectionRange(range, visibleRange)
-                    guard visibleTarget.length > 0 else { return [] }
+        var visibleRange: NSRange?
+        var checkedVisibleRange = false
+        func visiblePart(_ range: NSRange) -> NSRange {
+            if !checkedVisibleRange {
+                checkedVisibleRange = true
+                if let value = axValue(read(kAXVisibleCharacterRangeAttribute, on: snapshot.element, maximumWait: 0.01), type: .cfRange) {
+                    var visible = CFRange()
+                    if AXValueGetValue(value, .cfRange, &visible), visible.location >= 0, visible.length > 0 {
+                        let candidate = NSRange(location: visible.location, length: visible.length)
+                        if valid(candidate, in: snapshot.text) { visibleRange = candidate }
+                    }
                 }
             }
+            return visibleRange.map { NSIntersectionRange(range, $0) } ?? range
         }
-        let rectangles = HighlightLineGeometry.rectangles(in: snapshot.text, range: visibleTarget, lineRange: { index in
-            guard supportsLines else { return nil }
-            guard let line = query(kAXLineForIndexParameterizedAttribute, parameter: NSNumber(value: index)) as? NSNumber,
-                  line.intValue >= 0,
-                  let value = self.axValue(query(kAXRangeForLineParameterizedAttribute, parameter: line), type: .cfRange) else {
-                supportsLines = false
-                return nil
+        return ranges.map { range in
+            guard valid(range, in: snapshot.text), range.length > 0 else { return [] }
+            if (snapshot.text as NSString).rangeOfComposedCharacterSequence(at: range.location) == range {
+                let direct = clipped(rangeBounds(range).map { [$0] } ?? [])
+                if !direct.isEmpty { return direct }
+                let descendants = clipped(descendantBounds(range))
+                if !descendants.isEmpty { return descendants }
+                return clipped(markerBounds(range).map { [$0] } ?? [])
             }
-            var lineRange = CFRange()
-            guard AXValueGetValue(value, .cfRange, &lineRange), lineRange.location >= 0, lineRange.length > 0 else { return nil }
-            return NSRange(location: lineRange.location, length: lineRange.length)
-        }, bounds: { rangeBounds($0) }, shouldContinue: canQuery)
-        return clipped(rectangles.isEmpty ? descendantBounds(visibleTarget) : rectangles)
+            let target = visiblePart(range)
+            guard target.length > 0 else { return [] }
+            let rectangles = HighlightLineGeometry.rectangles(in: snapshot.text, range: target, lineRange: { index in
+                guard supportsLines else { return nil }
+                guard let line = query(kAXLineForIndexParameterizedAttribute, parameter: NSNumber(value: index)) as? NSNumber,
+                      line.intValue >= 0,
+                      let value = self.axValue(query(kAXRangeForLineParameterizedAttribute, parameter: line), type: .cfRange) else {
+                    supportsLines = false
+                    return nil
+                }
+                var lineRange = CFRange()
+                guard AXValueGetValue(value, .cfRange, &lineRange), lineRange.location >= 0, lineRange.length > 0 else { return nil }
+                return NSRange(location: lineRange.location, length: lineRange.length)
+            }, bounds: { rangeBounds($0) }, shouldContinue: canQuery)
+            let direct = clipped(rectangles)
+            if !direct.isEmpty { return direct }
+            let descendants = clipped(descendantBounds(target))
+            if !descendants.isEmpty { return descendants }
+            return clipped(HighlightLineGeometry.rectangles(in: snapshot.text, range: target,
+                lineRange: { _ in nil }, bounds: markerBounds, shouldContinue: canQuery))
+        }
     }
 
     /// Only the requested UTF-16 range is replaced. Never sets the whole field's
@@ -308,21 +417,49 @@ final class AccessibilityBridge {
         return unsafeBitCast(value, to: AXUIElement.self)
     }
 
+    private func enableBrowserAccessibilityIfNeeded() {
+        guard let app = NSWorkspace.shared.frontmostApplication,
+              app.processIdentifier != ProcessInfo.processInfo.processIdentifier,
+              let launched = app.launchDate,
+              accessibilityEnabledProcesses[app.processIdentifier] != launched else { return }
+        // Activation is per process, not per poll. Chrome debounces this setter
+        // for two seconds; repeatedly setting it would prevent activation.
+        accessibilityEnabledProcesses[app.processIdentifier] = launched
+        if accessibilityEnabledProcesses.count > 128 {
+            accessibilityEnabledProcesses = [app.processIdentifier: launched]
+        }
+        let application = AXUIElementCreateApplication(app.processIdentifier)
+        AXUIElementSetMessagingTimeout(application, 0.05)
+        // Electron exposes Manual as a capability. Do not infer an unknown app's
+        // implementation from its name or switch on undocumented flags globally.
+        if isSettable("AXManualAccessibility", on: application) {
+            _ = AXUIElementSetAttributeValue(application, "AXManualAccessibility" as CFString, kCFBooleanTrue)
+            return
+        }
+        let identifier = app.bundleIdentifier?.lowercased() ?? ""
+        let chromium = ["com.google.chrome", "org.chromium.chromium", "com.microsoft.edgemac",
+                        "com.brave.browser", "com.vivaldi.vivaldi", "com.operasoftware.opera",
+                        "company.thebrowser.browser"]
+        guard chromium.contains(where: { identifier == $0 || identifier.hasPrefix($0 + ".") }) else { return }
+        // Chromium handles EnhancedUI on the application without necessarily
+        // advertising it as settable. It enables the inline text boxes needed
+        // for character bounds. Never reset a mode another AX client may need.
+        _ = AXUIElementSetAttributeValue(application, "AXEnhancedUserInterface" as CFString, kCFBooleanTrue)
+    }
+
     private func requireEditable(_ element: AXUIElement) throws {
         let role = attribute(kAXRoleAttribute, on: element) as? String
         let subrole = attribute(kAXSubroleAttribute, on: element) as? String
         // Check before reading AXValue, including when revalidating an edit.
         guard subrole != kAXSecureTextFieldSubrole,
               role != kAXSecureTextFieldSubrole else { throw AccessibilityBridgeError.secureText }
-        guard (attribute(kAXEnabledAttribute, on: element) as? Bool) != false else {
-            throw AccessibilityBridgeError.noEditableText
-        }
+        let enabled = attribute(kAXEnabledAttribute, on: element) as? Bool
         let explicitlyEditable = attribute(kAXIsEditableAttribute, on: element) as? Bool
-        let textRole = role == kAXTextFieldRole || role == kAXTextAreaRole || role == kAXComboBoxRole
-        guard explicitlyEditable != false,
-              textRole || explicitlyEditable == true,
-              explicitlyEditable == true || isSettable(kAXValueAttribute, on: element)
-                || isSettable(kAXSelectedTextAttribute, on: element) else {
+        let valueWritable = explicitlyEditable == nil && isSettable(kAXValueAttribute, on: element)
+        let selectedWritable = explicitlyEditable == nil && !valueWritable && isSettable(kAXSelectedTextAttribute, on: element)
+        guard AccessibleTextCapturePolicy.editability(role: role, subrole: subrole, enabled: enabled,
+            editable: explicitlyEditable, valueWritable: valueWritable,
+            selectedTextWritable: selectedWritable) == .editable else {
             throw AccessibilityBridgeError.noEditableText
         }
     }

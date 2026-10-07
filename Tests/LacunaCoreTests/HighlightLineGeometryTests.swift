@@ -3,6 +3,24 @@ import CoreGraphics
 @testable import LacunaCore
 
 final class HighlightLineGeometryTests: XCTestCase {
+    func testZeroWidthGlyphDoesNotSuppressUsableRangeAndCaretGeometry() {
+        let text = "{hello}"
+        let target = NSRange(location: 0, length: text.utf16.count)
+        let row = CGRect(x: 100, y: 200, width: 63, height: 18)
+        let result = HighlightLineGeometry.rectangles(in: text, range: target,
+            lineRange: { _ in nil }, bounds: { range in
+                if range == target { return row }
+                return CGRect(x: 100 + range.location * 9, y: 200, width: 0, height: 18)
+            })
+        XCTAssertEqual(result, [row])
+    }
+
+    func testZeroWidthOpeningBraceDoesNotPretendToHaveVisibleGeometry() {
+        let result = HighlightLineGeometry.rectangles(in: "{", range: NSRange(location: 0, length: 1),
+            lineRange: { _ in nil }, bounds: { _ in CGRect(x: 100, y: 200, width: 0, height: 18) })
+        XCTAssertTrue(result.isEmpty)
+    }
+
     func testOpeningBraceKeepsValidBoundsWhenTheQueryFinishesAtTheDeadline() {
         let brace = CGRect(x: 100, y: 200, width: 9, height: 18)
         var hasTime = true

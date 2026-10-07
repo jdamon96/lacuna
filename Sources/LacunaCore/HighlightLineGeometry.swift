@@ -46,7 +46,9 @@ public enum HighlightLineGeometry {
             if queriedBounds.contains(range) { return cachedBounds[range] }
             try spendQuery()
             queriedBounds.insert(range)
-            if let value = bounds(range), usable(value) { cachedBounds[range] = value }
+            if let value = bounds(range), usable(value), range.length == 0 || value.width > 0 {
+                cachedBounds[range] = value
+            }
             return cachedBounds[range]
         }
         func measuredRowWithoutFirstGlyph(_ characters: ArraySlice<NSRange>) throws -> CGRect? {

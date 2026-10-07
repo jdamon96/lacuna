@@ -19,6 +19,7 @@ final class AppController: NSObject, NSApplicationDelegate {
     private let keyboard = ChoiceKeyboard()
     private let panel = FloatingPanel()
     private let highlight = BraceHighlight()
+    private let compatibilityReport = CompatibilityReportWindow()
     private let updater = AppUpdater()
     private var statusItem: NSStatusItem!
     private var settingsWindow: NSWindow?
@@ -36,6 +37,7 @@ final class AppController: NSObject, NSApplicationDelegate {
     private var triggerMonitor: Any?
     private var lastInvocation: TimeInterval = 0
     private var mouseMonitor: Any?
+    private var playgroundObservers: [NSObjectProtocol] = []
     private var dismissWork: DispatchWorkItem?
     private var shortcutWorks = true
     private var isRecordingShortcut = false
@@ -85,7 +87,12 @@ final class AppController: NSObject, NSApplicationDelegate {
     }
 
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool { showSettings(); return true }
-    func applicationWillTerminate(_ notification: Notification) { dismiss(); timer?.invalidate(); if let triggerMonitor { NSEvent.removeMonitor(triggerMonitor) }; if let mouseMonitor { NSEvent.removeMonitor(mouseMonitor) } }
+    func applicationWillTerminate(_ notification: Notification) {
+        dismiss(); timer?.invalidate()
+        if let triggerMonitor { NSEvent.removeMonitor(triggerMonitor) }
+        if let mouseMonitor { NSEvent.removeMonitor(mouseMonitor) }
+        playgroundObservers.forEach(NotificationCenter.default.removeObserver)
+    }
 
     private func setupMainMenu() {
         // AppKit text controls resolve Command-A/C/V/Z through the responder-chain menu.
@@ -100,6 +107,8 @@ final class AppController: NSObject, NSApplicationDelegate {
         let fill = appMenu.addItem(withTitle: "Fill template", action: #selector(trigger), keyEquivalent: "")
         fill.target = self
         appMenu.addItem(.separator())
+        let inspect = appMenu.addItem(withTitle: "Inspect text field…", action: #selector(inspectTextField), keyEquivalent: "")
+        inspect.target = self
         appMenu.addItem(withTitle: "Quit Lacuna", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
         appItem.submenu = appMenu; menu.addItem(appItem)
         let editItem = NSMenuItem(); let edit = NSMenu(title: "Edit")
@@ -133,6 +142,8 @@ final class AppController: NSObject, NSApplicationDelegate {
         settings.target = self; menu.addItem(settings)
         let playground = NSMenuItem(title: "Try Lacuna…", action: #selector(showPlayground), keyEquivalent: "")
         playground.target = self; menu.addItem(playground)
+        let inspect = NSMenuItem(title: "Inspect text field…", action: #selector(inspectTextField), keyEquivalent: "")
+        inspect.target = self; menu.addItem(inspect)
         menu.addItem(updater.makeMenuItem())
         menu.addItem(updater.makeAutomaticChecksMenuItem())
         menu.addItem(.separator())
@@ -145,6 +156,12 @@ final class AppController: NSObject, NSApplicationDelegate {
         preferences.enabled.toggle(); dismiss(); highlight.hide()
         if preferences.enabled { shortcutWorks = shortcut.register(preferences.shortcut) } else { shortcut.unregister() }
         refreshMenu()
+    }
+
+    @objc private func inspectTextField() {
+        let report = TextFieldCompatibilityReport.capture(using: accessibility)
+        dismiss(); highlight.hide()
+        compatibilityReport.show(report)
     }
 
     @objc func showSettings() {
@@ -187,13 +204,29 @@ final class AppController: NSObject, NSApplicationDelegate {
             text.setSelectedRange(NSRange(location: (text.string as NSString).length, length: 0))
             scroll.documentView = text; window.contentView = scroll; window.center()
             playgroundText = text; playgroundWindow = window
+            // Native editor events can refresh in the same display cycle;
+            // external applications continue using the bounded AX poll.
+            scroll.contentView.postsBoundsChangedNotifications = true
+            let observations: [(Notification.Name, AnyObject)] = [
+                (NSWindow.didMoveNotification, window),
+                (NSWindow.didResizeNotification, window),
+                (NSWindow.didChangeScreenNotification, window),
+                (NSText.didChangeNotification, text),
+                (NSTextView.didChangeSelectionNotification, text),
+                (NSView.boundsDidChangeNotification, scroll.contentView)
+            ]
+            playgroundObservers = observations.map { name, object in
+                NotificationCenter.default.addObserver(forName: name, object: object, queue: .main) { [weak self] _ in
+                    self?.poll()
+                }
+            }
         }
         playgroundWindow?.title = "Try Lacuna · \(preferences.shortcut.label) to fill"
         NSApp.activate(ignoringOtherApps: true); playgroundWindow?.makeKeyAndOrderFront(nil)
         playgroundWindow?.makeFirstResponder(playgroundText)
     }
 
-    private func capture() throws -> CapturedInput {
+    private func capture(forHighlighting: Bool = false) throws -> CapturedInput {
         if NSWorkspace.shared.frontmostApplication?.processIdentifier == ProcessInfo.processInfo.processIdentifier,
            let view = playgroundText, playgroundWindow?.isKeyWindow == true, playgroundWindow?.firstResponder === view {
             let rect = view.firstRect(forCharacterRange: view.selectedRange(), actualRange: nil)
@@ -201,12 +234,16 @@ final class AppController: NSObject, NSApplicationDelegate {
             let ax = CGRect(x: rect.minX, y: height - rect.maxY, width: rect.width, height: rect.height)
             return CapturedInput(text: view.string, selection: view.selectedRange(), anchor: ax, external: nil, local: view)
         }
-        let snapshot = try accessibility.capture()
+        let snapshot = try forHighlighting ? accessibility.captureForHighlighting() : accessibility.capture()
         return CapturedInput(text: snapshot.text, selection: snapshot.selection, anchor: snapshot.fieldFrame, external: snapshot, local: nil)
     }
     private func matches(_ original: CapturedInput) -> Bool {
-        guard let current = try? capture(), current.text.utf16.elementsEqual(original.text.utf16), current.selection == original.selection else { return false }
-        return sameEditor(current, original)
+        matchingInput(original) != nil
+    }
+    private func matchingInput(_ original: CapturedInput) -> CapturedInput? {
+        guard let current = try? capture(), current.text.utf16.elementsEqual(original.text.utf16),
+              current.selection == original.selection, sameEditor(current, original) else { return nil }
+        return current
     }
     private func sameEditor(_ current: CapturedInput, _ original: CapturedInput) -> Bool {
         if let a = original.external, let b = current.external { return a.pid == b.pid && CFEqual(a.element, b.element) }
@@ -222,10 +259,46 @@ final class AppController: NSObject, NSApplicationDelegate {
         return nil
     }
 
-    private func highlightBounds(_ range: NSRange, in input: CapturedInput) -> [CGRect] {
-        if let external = input.external { return accessibility.highlightBounds(for: range, in: external) }
-        if let local = input.local { return NativeTextGeometry.highlightBounds(for: range, in: local) }
-        return []
+    @discardableResult
+    private func showHighlights(in input: CapturedInput, active: NSRange? = nil) -> [CGRect] {
+        let plan = BraceHighlightPlan(text: input.text, selection: input.selection,
+                                     activeRange: active, showInactive: preferences.highlights)
+        let geometry: [[CGRect]]
+        if let external = input.external {
+            geometry = accessibility.highlightBounds(for: plan.items.map(\.range), in: external)
+        } else if let local = input.local {
+            let deadline = ProcessInfo.processInfo.systemUptime + 0.08
+            geometry = plan.items.map { item in
+                guard ProcessInfo.processInfo.systemUptime < deadline else { return [] }
+                return NativeTextGeometry.highlightBounds(for: item.range, in: local)
+            }
+        } else { geometry = plan.items.map { _ in [] } }
+        let regions = zip(plan.items, geometry).map { item, rects in
+            let style: BraceHighlight.Style
+            switch item.style {
+            case .opening: style = .opening
+            case .complete: style = .complete
+            case .active: style = .active
+            }
+            return BraceHighlight.Region(rects: rects, style: style)
+        }
+        var fieldIndicator: BraceHighlight.FieldIndicator?
+        let omittedPhrases = preferences.highlights && plan.phraseCount > plan.items.filter { $0.style != .opening }.count
+        if !plan.items.isEmpty, geometry.contains(where: \.isEmpty) || omittedPhrases {
+            var field = input.external?.fieldFrame
+            if let local = input.local, let window = local.window {
+                let screen = window.convertToScreen(local.convert(local.visibleRect, to: nil))
+                field = FloatingPanel.appKitRect(screen)
+            }
+            if let field {
+                let title = plan.phraseCount > 0
+                    ? "Lacuna · \(plan.phraseCount) \(plan.phraseCount == 1 ? "phrase" : "phrases")"
+                    : "Lacuna · Instruction started"
+                fieldIndicator = BraceHighlight.FieldIndicator(frame: field, title: title)
+            }
+        }
+        highlight.show(regions: regions, fieldIndicator: fieldIndicator)
+        return zip(plan.items, geometry).first(where: { $0.0.style == .active })?.1 ?? []
     }
 
     private func isShortcut(_ event: NSEvent) -> Bool {
@@ -285,7 +358,7 @@ final class AppController: NSObject, NSApplicationDelegate {
     private func presentSuggestions(in input: CapturedInput, sequence: TemplateSequence, refresh: Bool = false) {
         guard let template = sequence.current(in: input.text) else { dismiss(); return }
         self.input = input; self.template = template; self.sequence = sequence
-        let rects = highlightBounds(template.range, in: input)
+        let rects = showHighlights(in: input, active: template.range)
         // Anchor below all visible fragments, so the chooser doesn't cover a
         // continuation line of the phrase being filled.
         let anchor = rects.isEmpty ? bounds(template.range, in: input) ?? input.anchor
@@ -294,7 +367,6 @@ final class AppController: NSObject, NSApplicationDelegate {
         let count = sequence.totalCount
         let configuration = preferences.configuration
         let cacheKey = SuggestionCacheKey(text: input.text, template: template, configuration: configuration)
-        highlight.show(rects, style: .active)
         if !refresh, let cached = suggestions.suggestions(for: cacheKey) {
             panel.show(instruction: template.instruction, anchor: anchor, options: cached, phraseNumber: number, phraseCount: count)
             startKeyboard(local: input.local != nil)
@@ -309,8 +381,11 @@ final class AppController: NSObject, NSApplicationDelegate {
                 guard let self, !Task.isCancelled, self.requestID == id else { return }
                 self.request = nil
                 self.suggestions.store(suggestions, for: cacheKey)
-                guard self.matches(input) else { self.dismiss(); return }
-                self.panel.show(instruction: template.instruction, anchor: anchor, options: suggestions, phraseNumber: number, phraseCount: count)
+                guard let current = self.matchingInput(input) else { self.dismiss(); return }
+                let currentRects = self.showHighlights(in: current, active: template.range)
+                let currentAnchor = currentRects.isEmpty ? self.bounds(template.range, in: current) ?? current.anchor
+                    : currentRects.dropFirst().reduce(currentRects[0]) { $0.union($1) }
+                self.panel.show(instruction: template.instruction, anchor: currentAnchor, options: suggestions, phraseNumber: number, phraseCount: count)
             } catch {
                 guard let self, !Task.isCancelled, self.requestID == id else { return }
                 self.dismiss()
@@ -323,18 +398,15 @@ final class AppController: NSObject, NSApplicationDelegate {
         // Insertion deliberately changes the selected range before changing the text.
         guard insertion == nil else { return }
         if let input {
-            if !matches(input) { dismiss() }
-            else if let template { highlight.show(highlightBounds(template.range, in: input), style: .active) }
+            if let current = matchingInput(input), let template {
+                let rects = showHighlights(in: current, active: template.range)
+                let anchor = rects.isEmpty ? current.anchor : rects.dropFirst().reduce(rects[0]) { $0.union($1) }
+                panel.reanchor(anchor)
+            } else { dismiss() }
             return
         }
-        guard !panel.isVisible, preferences.highlights, let candidate = try? capture() else { highlight.hide(); return }
-        // The expression being written takes priority over a completed template elsewhere.
-        if let opening = BraceTemplate.pendingOpening(in: candidate.text, selection: candidate.selection) {
-            highlight.show(highlightBounds(opening, in: candidate), style: .opening)
-            return
-        }
-        guard let template = BraceTemplate.all(in: candidate.text).first else { highlight.hide(); return }
-        highlight.show(highlightBounds(template.range, in: candidate))
+        guard !panel.isVisible, preferences.highlights, let candidate = try? capture(forHighlighting: true) else { highlight.hide(); return }
+        showHighlights(in: candidate)
     }
 
     private func startKeyboard(local: Bool) {

@@ -17,7 +17,7 @@ From version 0.3.0, choose **Check for Updates…** in Lacuna’s menu to downlo
 ## Use
 
 1. Type something like `Let’s meet {a friendly way to suggest next Tuesday}.`
-2. Keep that text field focused. A subtle underline marks an unfinished opening `{`; completed phrases are highlighted when their text positions are available.
+2. Keep that text field focused. All completed phrases are highlighted, and a subtle underline marks an unfinished opening `{`. If an app exposes the text but not its character positions, Lacuna outlines the field and shows a phrase count instead.
 3. Press **⇧⌘K** to generate three options for the earliest brace phrase in the field. Its outline and the popup’s phrase counter show which phrase is active.
 4. Press **1**, **2**, or **3** to replace it. Lacuna then generates options for the next phrase, using your accepted wording as context. **Escape** stops the sequence and leaves the remaining phrases untouched.
 
@@ -31,7 +31,7 @@ Brace detection happens locally in the focused text field. Text is sent directly
 
 Updates use [Sparkle](https://sparkle-project.org/) and GitHub, with signed release metadata and archives verified before installation. Update checks do not send your editor text or API keys; system profiling is disabled.
 
-Lacuna uses macOS Accessibility APIs. Support depends on how each app exposes its editable text and text positions; some web editors, terminals, and custom controls may not work. Read-only pages and secure password fields are excluded. Try TextEdit in plain-text mode first.
+Lacuna uses macOS Accessibility APIs. Exact phrase highlights require character positions; the field indicator requires editable text and field bounds. Apps that expose neither cannot support these cues. Read-only pages and secure password fields are excluded. For a problem input, focus it and choose **Inspect text field…** in Lacuna’s menu to view a compatibility report. The report contains capabilities and counts, not your text; nothing is sent automatically.
 
 ## Build from source
 
@@ -45,7 +45,7 @@ cd lacuna
 
 This builds, installs to `~/Applications`, and opens Lacuna. Use `./scripts/build.sh` to build only, `swift test` to run tests, or `./scripts/release.sh` to create a universal DMG and ZIP in `dist/` (requires full Xcode).
 
-Release scripts default to version `0.4.0`, build `7`; override them with `--version` and `BUILD_NUMBER`. Releases require the Sparkle signing key; ordinary builds do not. See [Publishing releases](docs/RELEASING.md) for signing and updating the feed. Nothing is published automatically.
+Release scripts default to version `0.4.1`, build `8`; override them with `--version` and `BUILD_NUMBER`. Releases require the Sparkle signing key; ordinary builds do not. See [Publishing releases](docs/RELEASING.md) for signing and updating the feed. Nothing is published automatically.
 
 ## License
 

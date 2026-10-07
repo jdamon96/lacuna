@@ -75,7 +75,7 @@ struct SettingsView: View {
                             .font(.system(size: 13, weight: .medium, design: .monospaced))
                             .frame(minWidth: 110)
                     }
-                    Toggle("Highlight nearby braces", isOn: $preferences.highlights)
+                    Toggle("Highlight braces", isOn: $preferences.highlights)
                     Toggle("Launch at login", isOn: $launchAtLogin)
                 }
                 Section {
