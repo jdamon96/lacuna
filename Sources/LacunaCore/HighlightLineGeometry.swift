@@ -49,37 +49,82 @@ public enum HighlightLineGeometry {
             if let value = bounds(range), usable(value) { cachedBounds[range] = value }
             return cachedBounds[range]
         }
+        func measuredRowWithoutFirstGlyph(_ characters: ArraySlice<NSRange>) throws -> CGRect? {
+            guard let first = characters.first, let last = characters.last else { return nil }
+            let entire = NSUnionRange(first, last)
+            guard let measured = try rectangle(entire) else { return nil }
+            // Some editors expose range/caret bounds but not glyph bounds. A
+            // caret or another glyph supplies a real row height; a line-range
+            // hint alone cannot distinguish a soft-wrapped paragraph from a row.
+            let probes = [NSRange(location: first.location, length: 0), last,
+                          NSRange(location: NSMaxRange(last), length: 0)]
+            for probe in probes {
+                guard let anchor = try rectangle(probe),
+                      probe.length > 0 || anchor.width <= 4,
+                      sameRow(measured, anchor), measured.height <= anchor.height + 2,
+                      measured.insetBy(dx: -1, dy: -1).contains(CGPoint(x: anchor.midX, y: anchor.midY)) else { continue }
+                return measured
+            }
+            return nil
+        }
 
         do {
             for characters in segments where !characters.isEmpty {
                 var start = 0
                 while start < characters.count, result.count < maximumRectangles {
-                    guard let first = try rectangle(characters[start]) else { return result }
-                    try spendQuery()
-                    let hint = lineRange(characters[start].location)
-                    var candidate = characters.count - 1
-                    if let hint, hint.location >= 0, hint.length > 0,
-                       hint.location <= characters[start].location,
-                       hint.length <= source.length - hint.location {
-                        // A hint is useful only if it contains the first complete
-                        // character. Binary search avoids trusting a broken range.
-                        let hintEnd = NSMaxRange(hint)
-                        if hintEnd >= NSMaxRange(characters[start]) {
-                            var lower = start
-                            var upper = characters.count
-                            while lower + 1 < upper {
-                                let middle = lower + (upper - lower) / 2
-                                if NSMaxRange(characters[middle]) <= hintEnd { lower = middle }
-                                else { upper = middle }
-                            }
-                            candidate = lower
+                    guard let first = try rectangle(characters[start]) else {
+                        if let measured = try measuredRowWithoutFirstGlyph(characters[start...]) {
+                            result.append(measured)
                         }
+                        break
                     }
-
-                    guard let last = try rectangle(characters[candidate]) else { return result }
+                    let rowIndex = result.count
+                    var candidate = characters.count - 1
+                    // A single opening brace is already the complete target.
+                    if candidate == start { result.append(first); break }
+                    guard var last = try rectangle(characters[candidate]) else {
+                        // Offscreen or unsupported endpoint queries need not hide
+                        // a provider's valid first-row bounds for the whole range.
+                        let remainder = NSRange(location: characters[start].location,
+                                                length: NSMaxRange(characters[candidate]) - characters[start].location)
+                        if let measured = try rectangle(remainder), measured != first, sameRow(first, measured),
+                           measured.height <= first.height + 2,
+                           measured.insetBy(dx: -1, dy: -1).contains(first) {
+                            result.append(measured)
+                        }
+                        return result
+                    }
                     // Some custom controls ignore the requested range and return
                     // their entire field for every glyph. Omit that geometry.
-                    if candidate > start, first == last { return result }
+                    if first == last { return result }
+                    // Distinct endpoint bounds establish that this provider is
+                    // responding to the requested range, not returning its whole
+                    // field for every glyph. Refinement can now preserve a glyph.
+                    result.append(first)
+
+                    if !sameRow(first, last) {
+                        // Most templates fit one row. Do not spend time querying
+                        // optional line APIs until endpoint geometry needs them.
+                        try spendQuery()
+                        let hint = lineRange(characters[start].location)
+                        if let hint, hint.location >= 0, hint.length > 0,
+                           hint.location <= characters[start].location,
+                           hint.length <= source.length - hint.location {
+                            let hintEnd = NSMaxRange(hint)
+                            if hintEnd >= NSMaxRange(characters[start]) {
+                                var lower = start
+                                var upper = characters.count
+                                while lower + 1 < upper {
+                                    let middle = lower + (upper - lower) / 2
+                                    if NSMaxRange(characters[middle]) <= hintEnd { lower = middle }
+                                    else { upper = middle }
+                                }
+                                candidate = lower
+                                guard let hintedLast = try rectangle(characters[candidate]) else { return result }
+                                last = hintedLast
+                            }
+                        }
+                    }
                     var end = candidate
                     if !sameRow(first, last) {
                         // A paragraph hint or unsupported line API: find the last
@@ -97,20 +142,19 @@ public enum HighlightLineGeometry {
                     guard let final = try rectangle(characters[end]) else { return result }
                     let rowRange = NSRange(location: characters[start].location,
                                            length: NSMaxRange(characters[end]) - characters[start].location)
+                    let endpoints = first.union(final)
+                    // Endpoint geometry has already established a single row.
+                    // Preserve it if the optional range-bounds request times out.
+                    result[rowIndex] = endpoints
                     let measured = try rectangle(rowRange)
                     // Never use a rectangle spanning rows, even when an app's
                     // AX implementation returns the entire paragraph's bounds.
-                    let endpoints = first.union(final)
-                    let row: CGRect
                     if let measured, sameRow(first, measured), sameRow(final, measured),
                        measured.height <= endpoints.height + 2,
                        measured.insetBy(dx: -1, dy: -1).contains(first),
                        measured.insetBy(dx: -1, dy: -1).contains(final) {
-                        row = measured
-                    } else {
-                        row = endpoints
+                        result[rowIndex] = measured
                     }
-                    result.append(row)
                     start = end + 1
                 }
                 if result.count >= maximumRectangles { break }

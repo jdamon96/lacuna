@@ -119,32 +119,110 @@ final class AccessibilityBridge {
         let deadline = ProcessInfo.processInfo.systemUptime + 0.08
         var remainingCalls = 80
         var supportsLines = true
-        // A decorative highlight must not turn a slow editor into long, repeated
-        // synchronous IPC stalls. The normal capture/insertion timeout remains.
-        AXUIElementSetMessagingTimeout(snapshot.element, 0.025)
-        defer { AXUIElementSetMessagingTimeout(snapshot.element, 0.3) }
+        // Bound the whole operation, rather than requiring every editor to answer
+        // within 25ms. Optional refinement can stop after the first valid bounds.
+        func canQuery() -> Bool {
+            remainingCalls > 0 && ProcessInfo.processInfo.systemUptime < deadline
+        }
+        func beginQuery(on element: AXUIElement, maximumWait: TimeInterval = 0.08) -> Bool {
+            guard canQuery() else { return false }
+            remainingCalls -= 1
+            let remainingTime = max(0.001, deadline - ProcessInfo.processInfo.systemUptime)
+            AXUIElementSetMessagingTimeout(element, Float(min(maximumWait, remainingTime)))
+            return true
+        }
+        func query(_ name: String, parameter: CFTypeRef, on element: AXUIElement? = nil) -> CFTypeRef? {
+            let target = element ?? snapshot.element
+            guard beginQuery(on: target) else { return nil }
+            defer { AXUIElementSetMessagingTimeout(target, 0.3) }
+            var value: CFTypeRef?
+            guard AXUIElementCopyParameterizedAttributeValue(target, name as CFString,
+                                                             parameter, &value) == .success else { return nil }
+            return value
+        }
+        func read(_ name: String, on element: AXUIElement, maximumWait: TimeInterval = 0.08) -> CFTypeRef? {
+            guard beginQuery(on: element, maximumWait: maximumWait) else { return nil }
+            defer { AXUIElementSetMessagingTimeout(element, 0.3) }
+            return attribute(name, on: element)
+        }
+        func rangeBounds(_ range: NSRange, on element: AXUIElement? = nil) -> CGRect? {
+            guard let parameter = axRange(range),
+                  let value = axValue(query(kAXBoundsForRangeParameterizedAttribute, parameter: parameter, on: element), type: .cgRect) else { return nil }
+            var rect = CGRect.zero
+            return AXValueGetValue(value, .cgRect, &rect) && rect.isUsableAXFrame ? rect : nil
+        }
+        func clipped(_ rectangles: [CGRect]) -> [CGRect] {
+            // A zero-width AX field frame is missing geometry, not an empty
+            // clipping region. Glyph bounds can still be valid in such editors.
+            guard let field = snapshot.fieldFrame, field.isUsableAXFrame, field.width > 0 else { return rectangles }
+            return rectangles.compactMap {
+                let visible = $0.intersection(field)
+                return !visible.isNull && visible.width > 0 && visible.height > 0 ? visible : nil
+            }
+        }
+        func descendantBounds(_ targetRange: NSRange) -> [CGRect] {
+            // Chromium rich editors can expose value/selection on a container
+            // while range bounds exist only on its static-text descendants.
+            // Never leave the captured focused field or read another text input.
+            guard let children = read(kAXChildrenAttribute, on: snapshot.element) as? [AXUIElement],
+                  children.count <= 48 else { return [] }
+            var pending = children.reversed().map { ($0, 1) }
+            var visited: [AXUIElement] = []
+            var mapping = AccessibleTextRuns(text: snapshot.text)
+            var runs: [(element: AXUIElement, range: NSRange, text: String)] = []
+            let excluded = Set([kAXTextFieldRole, kAXTextAreaRole, kAXComboBoxRole,
+                                kAXSecureTextFieldSubrole, "AXWebArea"])
+            while let (element, depth) = pending.popLast() {
+                guard canQuery(), visited.count < 48, depth <= 8,
+                      !visited.contains(where: { CFEqual($0, element) }),
+                      let role = read(kAXRoleAttribute, on: element) as? String else { return [] }
+                visited.append(element)
+                if excluded.contains(role) { continue }
+                if role == kAXStaticTextRole {
+                    guard let text = read(kAXValueAttribute, on: element) as? String,
+                          let mapped = mapping.append(text) else { return [] }
+                    if mapped.length > 0 { runs.append((element, mapped, text)) }
+                } else {
+                    let descendants = read(kAXChildrenAttribute, on: element) as? [AXUIElement] ?? []
+                    guard pending.count + visited.count + descendants.count <= 48 else { return [] }
+                    pending.append(contentsOf: descendants.reversed().map { ($0, depth + 1) })
+                }
+            }
+            // Full coverage prevents an omitted duplicate run from making the
+            // next identical phrase appear to be the template's earlier copy.
+            guard mapping.isComplete else { return [] }
+            var rectangles: [CGRect] = []
+            for run in runs {
+                let overlap = NSIntersectionRange(targetRange, run.range)
+                guard overlap.length > 0 else { continue }
+                guard canQuery(), rectangles.count < 16 else { break }
+                let local = NSRange(location: overlap.location - run.range.location, length: overlap.length)
+                rectangles += HighlightLineGeometry.rectangles(in: run.text, range: local,
+                    maximumRectangles: 16 - rectangles.count, lineRange: { _ in nil },
+                    bounds: { rangeBounds($0, on: run.element) }, shouldContinue: canQuery)
+            }
+            return rectangles
+        }
+
+        // Pending opening braces are one composed character. Their AX bounds are
+        // already the complete highlight; visible-range and line APIs add no value.
+        if (snapshot.text as NSString).rangeOfComposedCharacterSequence(at: range.location) == range {
+            if let rect = rangeBounds(range) { return clipped([rect]) }
+            return clipped(descendantBounds(range))
+        }
+
         var visibleTarget = range
-        remainingCalls -= 1
-        if let value = axValue(attribute(kAXVisibleCharacterRangeAttribute, on: snapshot.element), type: .cfRange) {
+        // Visible-range metadata is advisory and must not consume the budget for
+        // useful bounds. Some custom editors expose {0,0} for nonempty fields.
+        if let value = axValue(read(kAXVisibleCharacterRangeAttribute, on: snapshot.element, maximumWait: 0.01), type: .cfRange) {
             var visible = CFRange()
-            if AXValueGetValue(value, .cfRange, &visible), visible.location >= 0, visible.length >= 0 {
+            if AXValueGetValue(value, .cfRange, &visible), visible.location >= 0, visible.length > 0 {
                 let visibleRange = NSRange(location: visible.location, length: visible.length)
                 if valid(visibleRange, in: snapshot.text) {
                     visibleTarget = NSIntersectionRange(range, visibleRange)
                     guard visibleTarget.length > 0 else { return [] }
                 }
             }
-        }
-        func canQuery() -> Bool {
-            remainingCalls > 0 && ProcessInfo.processInfo.systemUptime < deadline
-        }
-        func query(_ name: String, parameter: CFTypeRef) -> CFTypeRef? {
-            guard canQuery() else { return nil }
-            remainingCalls -= 1
-            var value: CFTypeRef?
-            guard AXUIElementCopyParameterizedAttributeValue(snapshot.element, name as CFString,
-                                                             parameter, &value) == .success else { return nil }
-            return value
         }
         let rectangles = HighlightLineGeometry.rectangles(in: snapshot.text, range: visibleTarget, lineRange: { index in
             guard supportsLines else { return nil }
@@ -157,17 +235,8 @@ final class AccessibilityBridge {
             var lineRange = CFRange()
             guard AXValueGetValue(value, .cfRange, &lineRange), lineRange.location >= 0, lineRange.length > 0 else { return nil }
             return NSRange(location: lineRange.location, length: lineRange.length)
-        }, bounds: { range in
-            guard let parameter = self.axRange(range),
-                  let value = self.axValue(query(kAXBoundsForRangeParameterizedAttribute, parameter: parameter), type: .cgRect) else { return nil }
-            var rect = CGRect.zero
-            return AXValueGetValue(value, .cgRect, &rect) && rect.isUsableAXFrame ? rect : nil
-        }, shouldContinue: canQuery)
-        guard let field = snapshot.fieldFrame, field.isUsableAXFrame else { return rectangles }
-        return rectangles.compactMap {
-            let visible = $0.intersection(field)
-            return !visible.isNull && visible.width > 0 && visible.height > 0 ? visible : nil
-        }
+        }, bounds: { rangeBounds($0) }, shouldContinue: canQuery)
+        return clipped(rectangles.isEmpty ? descendantBounds(visibleTarget) : rectangles)
     }
 
     /// Only the requested UTF-16 range is replaced. Never sets the whole field's

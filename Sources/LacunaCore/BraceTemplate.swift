@@ -10,14 +10,10 @@ public struct BraceTemplate: Equatable, Sendable {
         self.instruction = instruction
     }
 
-    /// Finds the template containing the selection, or the nearest complete template.
-    /// Ties prefer a template before the caret. Escaped, nested, empty, and `${…}`
+    /// All complete templates in text order. Escaped, nested, empty, and `${…}`
     /// expressions are ignored. Ranges use the same UTF-16 coordinates as macOS AX.
-    public static func find(in text: String, selection: NSRange) -> BraceTemplate? {
+    public static func all(in text: String) -> [BraceTemplate] {
         let units = Array(text.utf16)
-        guard selection.location != NSNotFound, selection.location >= 0,
-              selection.length >= 0, selection.location <= units.count,
-              selection.length <= units.count - selection.location else { return nil }
         let source = text as NSString
         var candidates: [BraceTemplate] = []
         var depth = 0
@@ -47,13 +43,22 @@ public struct BraceTemplate: Equatable, Sendable {
                 }
             }
         }
+        return candidates
+    }
 
+    /// Finds the template containing the selection, or the nearest complete template.
+    /// Ties prefer a template before the caret. Use `all(in:)` for document order.
+    public static func find(in text: String, selection: NSRange) -> BraceTemplate? {
+        let length = text.utf16.count
+        guard selection.location != NSNotFound, selection.location >= 0,
+              selection.length >= 0, selection.location <= length,
+              selection.length <= length - selection.location else { return nil }
         func distance(_ template: BraceTemplate) -> Int {
             if NSMaxRange(template.range) < selection.location { return selection.location - NSMaxRange(template.range) }
             if template.range.location > NSMaxRange(selection) { return template.range.location - NSMaxRange(selection) }
             return 0
         }
-        return candidates.min { lhs, rhs in
+        return all(in: text).min { lhs, rhs in
             let left = distance(lhs), right = distance(rhs)
             if left != right { return left < right }
             let leftContains = lhs.range.location <= selection.location && NSMaxRange(lhs.range) >= NSMaxRange(selection)

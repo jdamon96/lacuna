@@ -18,6 +18,8 @@ jobs:
         run: swift test
       - name: Test native multiline highlights
         run: scripts/tests/test-highlight-geometry.sh
+      - name: Test highlight window lifecycle
+        run: scripts/tests/test-highlight-panel.sh
       - name: Test release feed generation
         run: python3 scripts/tests/test_update_appcast.py
       - name: Build universal app

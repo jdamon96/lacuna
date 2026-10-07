@@ -31,6 +31,7 @@ final class AppController: NSObject, NSApplicationDelegate {
     private var requestID = UUID()
     private var input: CapturedInput?
     private var template: BraceTemplate?
+    private var sequence: TemplateSequence?
     private var localMonitor: Any?
     private var triggerMonitor: Any?
     private var lastInvocation: TimeInterval = 0
@@ -67,7 +68,11 @@ final class AppController: NSObject, NSApplicationDelegate {
             return self.handleKey(code, modified: !flags.intersection([.maskCommand, .maskControl, .maskAlternate, .maskShift]).isEmpty,
                                   commandOnly: flags.intersection([.maskCommand, .maskControl, .maskAlternate, .maskShift]) == .maskCommand)
         }
-        timer = Timer.scheduledTimer(withTimeInterval: 0.45, repeats: true) { [weak self] _ in self?.poll() }
+        // Keep the overlay following text during window drags/live resize too.
+        let trackingTimer = Timer(timeInterval: 0.2, repeats: true) { [weak self] _ in self?.poll() }
+        trackingTimer.tolerance = 0.025
+        RunLoop.main.add(trackingTimer, forMode: .common)
+        timer = trackingTimer
         mouseMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown, .scrollWheel]) { [weak self] _ in
             self?.dismiss(); self?.highlight.hide()
         }
@@ -250,44 +255,68 @@ final class AppController: NSObject, NSApplicationDelegate {
     }
     private func beginSuggestions(refresh: Bool = false) {
         guard preferences.enabled, !isRecordingShortcut, insertion == nil else { return }
+        let previousInput = input
+        let previousSequence = sequence
         dismiss(); highlight.hide()
         do {
             let input = try capture()
-            if let opening = BraceTemplate.pendingOpening(in: input.text, selection: input.selection) {
-                showMessage("Close the instruction with } to get suggestions.", anchor: bounds(opening, in: input) ?? input.anchor)
-                return
-            }
-            guard let template = BraceTemplate.find(in: input.text, selection: input.selection) else {
-                showMessage("Type an instruction in {braces}, then place your cursor nearby.", anchor: input.anchor)
-                return
-            }
-            self.input = input; self.template = template
-            let anchor = bounds(template.range, in: input) ?? bounds(input.selection, in: input) ?? input.anchor
-            let configuration = preferences.configuration
-            let cacheKey = SuggestionCacheKey(text: input.text, template: template, configuration: configuration)
-            if !refresh, let cached = suggestions.suggestions(for: cacheKey) {
-                panel.show(instruction: template.instruction, anchor: anchor, options: cached)
-                startKeyboard(local: input.local != nil)
-                return
-            }
-            panel.show(instruction: template.instruction, anchor: anchor, loading: true)
-            startKeyboard(local: input.local != nil)
-            let id = UUID(); requestID = id
-            request = Task { @MainActor [weak self] in
-                do {
-                    let suggestions = try await CompletionClient().suggestions(for: template, in: input.text, configuration: configuration)
-                    guard let self, !Task.isCancelled, self.requestID == id else { return }
-                    self.request = nil
-                    self.suggestions.store(suggestions, for: cacheKey)
-                    guard self.matches(input) else { self.dismiss(); return }
-                    self.panel.show(instruction: template.instruction, anchor: anchor, options: suggestions)
-                } catch {
-                    guard let self, !Task.isCancelled, self.requestID == id else { return }
-                    self.request = nil; self.input = nil; self.template = nil
-                    self.showMessage(error.localizedDescription, anchor: anchor)
+            let sequence: TemplateSequence
+            if refresh {
+                guard let previousInput, let previousSequence,
+                      sameEditor(input, previousInput), previousSequence.isValid(in: input.text) else {
+                    throw AccessibilityBridgeError.changedText
                 }
+                sequence = previousSequence
+            } else {
+                sequence = TemplateSequence(text: input.text)
             }
+            guard sequence.current != nil else {
+                if let opening = BraceTemplate.pendingOpening(in: input.text, selection: input.selection) {
+                    showMessage("Close the instruction with } to get suggestions.", anchor: bounds(opening, in: input) ?? input.anchor)
+                } else {
+                    showMessage("Type an instruction in {braces}, then press the shortcut to fill it.", anchor: input.anchor)
+                }
+                return
+            }
+            presentSuggestions(in: input, sequence: sequence, refresh: refresh)
         } catch { showMessage(error.localizedDescription, anchor: nil) }
+    }
+
+    private func presentSuggestions(in input: CapturedInput, sequence: TemplateSequence, refresh: Bool = false) {
+        guard let template = sequence.current(in: input.text) else { dismiss(); return }
+        self.input = input; self.template = template; self.sequence = sequence
+        let rects = highlightBounds(template.range, in: input)
+        // Anchor below all visible fragments, so the chooser doesn't cover a
+        // continuation line of the phrase being filled.
+        let anchor = rects.isEmpty ? bounds(template.range, in: input) ?? input.anchor
+            : rects.dropFirst().reduce(rects[0]) { $0.union($1) }
+        let number = sequence.completedCount + 1
+        let count = sequence.totalCount
+        let configuration = preferences.configuration
+        let cacheKey = SuggestionCacheKey(text: input.text, template: template, configuration: configuration)
+        highlight.show(rects, style: .active)
+        if !refresh, let cached = suggestions.suggestions(for: cacheKey) {
+            panel.show(instruction: template.instruction, anchor: anchor, options: cached, phraseNumber: number, phraseCount: count)
+            startKeyboard(local: input.local != nil)
+            return
+        }
+        panel.show(instruction: template.instruction, anchor: anchor, loading: true, phraseNumber: number, phraseCount: count)
+        startKeyboard(local: input.local != nil)
+        let id = UUID(); requestID = id
+        request = Task { @MainActor [weak self] in
+            do {
+                let suggestions = try await CompletionClient().suggestions(for: template, in: input.text, configuration: configuration)
+                guard let self, !Task.isCancelled, self.requestID == id else { return }
+                self.request = nil
+                self.suggestions.store(suggestions, for: cacheKey)
+                guard self.matches(input) else { self.dismiss(); return }
+                self.panel.show(instruction: template.instruction, anchor: anchor, options: suggestions, phraseNumber: number, phraseCount: count)
+            } catch {
+                guard let self, !Task.isCancelled, self.requestID == id else { return }
+                self.dismiss()
+                self.showMessage(error.localizedDescription, anchor: anchor)
+            }
+        }
     }
     private func poll() {
         guard preferences.enabled else { highlight.hide(); return }
@@ -295,6 +324,7 @@ final class AppController: NSObject, NSApplicationDelegate {
         guard insertion == nil else { return }
         if let input {
             if !matches(input) { dismiss() }
+            else if let template { highlight.show(highlightBounds(template.range, in: input), style: .active) }
             return
         }
         guard !panel.isVisible, preferences.highlights, let candidate = try? capture() else { highlight.hide(); return }
@@ -303,7 +333,7 @@ final class AppController: NSObject, NSApplicationDelegate {
             highlight.show(highlightBounds(opening, in: candidate), style: .opening)
             return
         }
-        guard let template = BraceTemplate.find(in: candidate.text, selection: candidate.selection) else { highlight.hide(); return }
+        guard let template = BraceTemplate.all(in: candidate.text).first else { highlight.hide(); return }
         highlight.show(highlightBounds(template.range, in: candidate))
     }
 
@@ -332,6 +362,12 @@ final class AppController: NSObject, NSApplicationDelegate {
             }
         }
         guard !modified else { dismiss(); return false }
+        if panel.state.loading, panel.state.options.isEmpty,
+           [18, 19, 20, 83, 84, 85, 36, 76, 48, 125, 126].contains(code) {
+            // A repeated choice key between phrases must not type into the
+            // editor (or submit its form) while the next options are loading.
+            return true
+        }
         let options = panel.state.options
         if !options.isEmpty {
             let numbers: [UInt16: Int] = [18: 0, 19: 1, 20: 2, 83: 0, 84: 1, 85: 2]
@@ -379,7 +415,18 @@ final class AppController: NSObject, NSApplicationDelegate {
                 }
                 self.insertion = nil
                 guard self.requestID == id else { return }
+                // Re-read the same editor after insertion. Later requests see the
+                // accepted wording, and only the original queued phrases advance.
+                let current = try? self.capture()
+                var next = self.sequence
+                let canContinue = current.map { current in
+                    self.sameEditor(current, input)
+                        && next?.advance(afterReplacingWith: replacement, in: current.text) == true
+                } ?? false
                 self.dismiss()
+                if canContinue, let current, let next, next.current != nil {
+                    self.presentSuggestions(in: current, sequence: next)
+                }
             } catch {
                 self.insertion = nil
                 guard self.requestID == id else { return }
@@ -418,7 +465,7 @@ final class AppController: NSObject, NSApplicationDelegate {
         // Keep the task reference until it finishes any already-posted paste and
         // clipboard restoration. No new insertion may overlap that cleanup.
         insertion?.cancel()
-        input = nil; template = nil
+        input = nil; template = nil; sequence = nil
         dismissWork?.cancel(); dismissWork = nil
         stopKeyboard(); panel.hide(); panel.state.options = []; highlight.hide()
     }

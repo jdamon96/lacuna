@@ -3,17 +3,17 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
-VERSION="${VERSION:-0.3.1}"
-BUILD_NUMBER="${BUILD_NUMBER:-6}"
+VERSION="${VERSION:-0.4.0}"
+BUILD_NUMBER="${BUILD_NUMBER:-7}"
 SPARKLE_ACCOUNT="${SPARKLE_ACCOUNT:-com.jdamon.lacuna.updates}"
 RELEASE_REPOSITORY="${RELEASE_REPOSITORY:-jdamon96/lacuna}"
 
 usage() {
     cat <<'USAGE'
-Usage: scripts/release.sh [--version 0.3.1]
+Usage: scripts/release.sh [--version 0.4.0]
 
 Build a universal app, ZIP, and DMG in dist/ without publishing them. Requires Xcode.
-Environment: VERSION (default: 0.3.1), BUILD_NUMBER (default: 6).
+Environment: VERSION (default: 0.4.0), BUILD_NUMBER (default: 7).
 Sparkle: SPARKLE_ACCOUNT (Keychain account; default: com.jdamon.lacuna.updates),
 RELEASE_NOTES_FILE (optional plain-text notes), RELEASE_REPOSITORY (owner/repo).
 Set SIGNING_IDENTITY to a Developer ID Application identity to sign.

@@ -3,6 +3,98 @@ import CoreGraphics
 @testable import LacunaCore
 
 final class HighlightLineGeometryTests: XCTestCase {
+    func testOpeningBraceKeepsValidBoundsWhenTheQueryFinishesAtTheDeadline() {
+        let brace = CGRect(x: 100, y: 200, width: 9, height: 18)
+        var hasTime = true
+        var lineQueries = 0
+        let result = HighlightLineGeometry.rectangles(in: "{", range: NSRange(location: 0, length: 1),
+            lineRange: { _ in lineQueries += 1; return nil },
+            bounds: { _ in hasTime = false; return brace },
+            shouldContinue: { hasTime })
+        XCTAssertEqual(result, [brace])
+        XCTAssertEqual(lineQueries, 0, "One glyph does not require optional visual-line metadata")
+    }
+
+    func testSingleLineKeepsVerifiedEndpointsWhenRefinementBudgetExpires() {
+        let fixture = Layout("{short instruction}", columns: 80)
+        let target = NSRange(location: 0, length: (fixture.text as NSString).length)
+        var boundsQueries = 0
+        var lineQueries = 0
+        let result = HighlightLineGeometry.rectangles(in: fixture.text, range: target,
+            lineRange: { _ in lineQueries += 1; return nil },
+            bounds: { boundsQueries += 1; return fixture.unionBounds($0) },
+            shouldContinue: { boundsQueries < 2 })
+        XCTAssertEqual(result, fixture.expected(target))
+        XCTAssertEqual(boundsQueries, 2)
+        XCTAssertEqual(lineQueries, 0, "Slow or unsupported line APIs must not gate one-row highlights")
+    }
+
+    func testSingleLineKeepsEndpointsWhenWholeRangeBoundsAreUnsupported() {
+        let fixture = Layout("{short instruction}", columns: 80)
+        let target = NSRange(location: 0, length: (fixture.text as NSString).length)
+        let result = HighlightLineGeometry.rectangles(in: fixture.text, range: target,
+            lineRange: { _ in XCTFail("Unneeded line metadata"); return nil },
+            bounds: { $0.length == 1 ? fixture.unionBounds($0) : nil })
+        XCTAssertEqual(result, fixture.expected(target))
+    }
+
+    func testUnavailableOffscreenEndpointKeepsSafeFirstRowBounds() {
+        let fixture = Layout("{first row and an offscreen closing brace}", columns: 14)
+        let target = NSRange(location: 0, length: (fixture.text as NSString).length)
+        let result = HighlightLineGeometry.rectangles(in: fixture.text, range: target,
+            lineRange: { _ in nil }, bounds: { range in
+                if range == NSRange(location: NSMaxRange(target) - 1, length: 1) { return nil }
+                return fixture.firstRowBounds(range)
+            })
+        XCTAssertEqual(result, Array(fixture.expected(target).prefix(1)))
+    }
+
+    func testUnavailableEndpointDoesNotAllowAnUnverifiedMultilineUnion() {
+        let fixture = Layout("{first row and an offscreen closing brace}", columns: 14)
+        let target = NSRange(location: 0, length: (fixture.text as NSString).length)
+        let result = HighlightLineGeometry.rectangles(in: fixture.text, range: target,
+            lineRange: { _ in nil }, bounds: { range in
+                if range == NSRange(location: NSMaxRange(target) - 1, length: 1) { return nil }
+                return fixture.unionBounds(range)
+            })
+        XCTAssertTrue(result.isEmpty)
+    }
+
+    func testRangeAndCaretOnlyProviderStillHighlightsSingleLineTemplate() {
+        let text = "{hello}"
+        let target = NSRange(location: 0, length: text.utf16.count)
+        let row = CGRect(x: 100, y: 200, width: 63, height: 18)
+        let result = HighlightLineGeometry.rectangles(in: text, range: target,
+            lineRange: { _ in nil }, bounds: { range in
+                if range == target { return row }
+                if range.length == 0 { return CGRect(x: 100 + range.location * 9, y: 200, width: 0, height: 18) }
+                return nil
+            })
+        XCTAssertEqual(result, [row])
+    }
+
+    func testRangeFallbackRejectsMultilineUnionEvenWithAParagraphLineHint() {
+        let text = "{wrapped instruction}"
+        let target = NSRange(location: 0, length: text.utf16.count)
+        let result = HighlightLineGeometry.rectangles(in: text, range: target,
+            lineRange: { _ in target }, bounds: { range in
+                if range == target { return CGRect(x: 100, y: 200, width: 300, height: 62) }
+                if range.length == 0 { return CGRect(x: 100, y: 200, width: 0, height: 18) }
+                return nil
+            })
+        XCTAssertTrue(result.isEmpty)
+    }
+
+    func testRangeOnlyProviderCannotUseUnverifiedBoundsWithoutAnyLineHeight() {
+        let text = "{unknown wrapping}"
+        let target = NSRange(location: 0, length: text.utf16.count)
+        let result = HighlightLineGeometry.rectangles(in: text, range: target,
+            lineRange: { _ in target }, bounds: { range in
+                range == target ? CGRect(x: 100, y: 200, width: 300, height: 200) : nil
+            })
+        XCTAssertTrue(result.isEmpty)
+    }
+
     func testVisualLineRangesHighlightEveryWrappedLineWithoutAUnion() {
         let fixture = Layout("before {a warm one-sentence sign-off} after", columns: 16)
         let target = (fixture.text as NSString).range(of: "{a warm one-sentence sign-off}")
@@ -70,6 +162,13 @@ final class HighlightLineGeometryTests: XCTestCase {
     func testUnsupportedConstantGeometryIsOmitted() {
         let result = HighlightLineGeometry.rectangles(in: "{hello}", range: NSRange(location: 0, length: 7),
             lineRange: { _ in nil }, bounds: { _ in CGRect(x: 0, y: 0, width: 500, height: 400) })
+        XCTAssertTrue(result.isEmpty)
+    }
+
+    func testBudgetExpiryCannotPreserveAnUnverifiedWholeFieldRectangle() {
+        let result = HighlightLineGeometry.rectangles(in: "{hello}", range: NSRange(location: 0, length: 7),
+            maximumQueries: 1, lineRange: { _ in nil },
+            bounds: { _ in CGRect(x: 0, y: 0, width: 500, height: 400) })
         XCTAssertTrue(result.isEmpty)
     }
 

@@ -9,6 +9,8 @@ final class PassivePanel: NSPanel {
 
 final class SuggestionState: ObservableObject {
     @Published var instruction = ""
+    @Published var phraseNumber = 0
+    @Published var phraseCount = 0
     @Published var options: [String] = []
     @Published var selected = 0
     @Published var message = ""
@@ -185,6 +187,10 @@ struct SuggestionView: View {
             HStack(spacing: 9) {
                 Text("{ }").font(.system(size: 17, weight: .semibold, design: .monospaced)).foregroundStyle(.indigo)
                 Text("Lacuna").font(.system(size: 14, weight: .semibold))
+                if state.phraseCount > 1 {
+                    Text("Phrase \(state.phraseNumber) of \(state.phraseCount)")
+                        .font(.system(size: 12)).foregroundStyle(.secondary)
+                }
                 Spacer()
                 Button { state.dismiss?() } label: {
                     Text("esc").font(.system(size: 11, design: .monospaced)).foregroundStyle(.secondary)
@@ -257,8 +263,10 @@ final class FloatingPanel {
         panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .ignoresCycle]
         panel.contentView = NSHostingView(rootView: SuggestionView(state: state))
     }
-    func show(instruction: String, anchor: CGRect?, loading: Bool = false, options: [String] = [], message: String = "") {
+    func show(instruction: String, anchor: CGRect?, loading: Bool = false, options: [String] = [], message: String = "",
+              phraseNumber: Int = 0, phraseCount: Int = 0) {
         state.instruction = instruction; state.loading = loading; state.options = options
+        state.phraseNumber = phraseNumber; state.phraseCount = phraseCount
         state.message = message; state.selected = 0; state.isInserting = false; state.canInsert = true
         self.anchor = anchor
         refreshLayout()
@@ -312,12 +320,14 @@ private final class BraceHighlightView: NSView {
             case .opening:
                 NSColor.systemIndigo.withAlphaComponent(0.8).setFill()
                 NSBezierPath(roundedRect: rect, xRadius: 1, yRadius: 1).fill()
-            case .complete:
-                let path = NSBezierPath(roundedRect: rect.insetBy(dx: 0.5, dy: 0.5), xRadius: 4, yRadius: 4)
-                NSColor.systemIndigo.withAlphaComponent(0.08).setFill()
+            case .complete, .active:
+                let active = style == .active
+                let lineWidth: CGFloat = active ? 1.5 : 1
+                let path = NSBezierPath(roundedRect: rect.insetBy(dx: lineWidth / 2, dy: lineWidth / 2), xRadius: 4, yRadius: 4)
+                NSColor.systemIndigo.withAlphaComponent(active ? 0.14 : 0.08).setFill()
                 path.fill()
-                NSColor.systemIndigo.withAlphaComponent(0.5).setStroke()
-                path.lineWidth = 1
+                NSColor.systemIndigo.withAlphaComponent(active ? 0.85 : 0.5).setStroke()
+                path.lineWidth = lineWidth
                 path.stroke()
             }
         }
@@ -325,13 +335,16 @@ private final class BraceHighlightView: NSView {
 }
 
 final class BraceHighlight {
-    enum Style { case opening, complete }
+    enum Style { case opening, complete, active }
     private let panel: PassivePanel
     private let view = BraceHighlightView()
     init() {
         panel = PassivePanel(contentRect: .zero, styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
         panel.level = .floating; panel.backgroundColor = .clear; panel.isOpaque = false
         panel.ignoresMouseEvents = true; panel.hasShadow = false; panel.hidesOnDeactivate = false
+        // A caret move may hide and reopen this window in the same display
+        // cycle. AppKit's default order animation can leave that cue fading out.
+        panel.animationBehavior = .none
         panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .ignoresCycle]
         panel.contentView = view
     }
@@ -346,7 +359,7 @@ final class BraceHighlight {
                 // A quiet underline acknowledges an unfinished expression.
                 return CGRect(x: frame.minX - 1, y: frame.minY - 2,
                               width: max(7, frame.width + 2), height: 2)
-            case .complete:
+            case .complete, .active:
                 return frame.insetBy(dx: -2, dy: -2)
             }
         }
