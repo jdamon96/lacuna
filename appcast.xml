@@ -7,6 +7,20 @@ IMPORTANT: This file was signed by Sparkle. Any modifications to this file requi
     <description>Updates for Lacuna for macOS.</description>
     <language>en</language>
     <item>
+      <title>Lacuna 0.4.1</title>
+      <link>https://github.com/jdamon96/lacuna/releases/tag/v0.4.1</link>
+      <sparkle:version>8</sparkle:version>
+      <sparkle:shortVersionString>0.4.1</sparkle:shortVersionString>
+      <sparkle:minimumSystemVersion>13.0.0</sparkle:minimumSystemVersion>
+      <pubDate>Wed, 07 Oct 2026 17:00:16 +0000</pubDate>
+      <description sparkle:format="plain-text">All complete brace phrases are now highlighted together, alongside an unfinished opening brace. The phrase currently being filled has a stronger outline, while the other phrases stay visible.
+
+Improves editable-field detection and text-position support, including Chrome accessibility activation and validated text-marker geometry. Highlighting no longer requires a writable cursor selection. When an app exposes editable text and field bounds but no character positions, Lacuna shows a distinct field outline and phrase count instead of guessing where the words are.
+
+Highlights follow movement immediately in Try Lacuna, and active suggestions use fresh field positions when windows move. Inspect text field… in the menu provides a local compatibility report with capabilities and counts, without including your text.</description>
+      <enclosure url="https://github.com/jdamon96/lacuna/releases/download/v0.4.1/Lacuna-0.4.1-universal.zip" sparkle:edSignature="+DqXMMi+X0hwFdN5cdXZUlxT4zIVu/WqD00yr1zyG+Eeo06kRCoEt5m9/JeWXEPkhqFUrqa+OU/2nvONJ6FkDA==" length="2101692" type="application/octet-stream"></enclosure>
+    </item>
+    <item>
       <title>Lacuna 0.4.0</title>
       <link>https://github.com/jdamon96/lacuna/releases/tag/v0.4.0</link>
       <sparkle:version>7</sparkle:version>
@@ -50,6 +64,6 @@ This is the first version with an updater. Versions 0.2.x need one manual instal
     </item>
   </channel>
 </rss><!-- sparkle-signatures:
-edSignature: Apq8hi+/qPUrpdMefir8wwN1trSChBuQJi2cGp+wQHCapEsWnyI3x53uuKq60K+4Yf8orAciIy8Hk+s3rPRiDQ==
-length: 4199
+edSignature: 1cRcW88A8xPJM9fSzEItHSZ6QMOj8UDtefcg0L8KDo+mYftdu2jfvrMF6kQlmOYCeSEcEgaPMISDBBda/hEFBw==
+length: 5739
 -->
