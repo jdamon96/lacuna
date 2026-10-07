@@ -7,6 +7,20 @@ IMPORTANT: This file was signed by Sparkle. Any modifications to this file requi
     <description>Updates for Lacuna for macOS.</description>
     <language>en</language>
     <item>
+      <title>Lacuna 0.4.0</title>
+      <link>https://github.com/jdamon96/lacuna/releases/tag/v0.4.0</link>
+      <sparkle:version>7</sparkle:version>
+      <sparkle:shortVersionString>0.4.0</sparkle:shortVersionString>
+      <sparkle:minimumSystemVersion>13.0.0</sparkle:minimumSystemVersion>
+      <pubDate>Wed, 07 Oct 2026 16:30:57 +0000</pubDate>
+      <description sparkle:format="plain-text">Fill multiple brace phrases in order. Lacuna starts with the earliest phrase, highlights the active one, and shows your progress in the suggestion popup. Accepting an option starts the next request using your updated wording as context. Escape stops the sequence without changing the remaining phrases.
+
+Restores highlights in Chrome rich-text inputs that expose text positions only through their text nodes. Opening-brace highlights no longer depend on optional line metadata, and valid highlights survive slow or incomplete accessibility responses.
+
+Highlights appear immediately when reopened and track window movement more closely.</description>
+      <enclosure url="https://github.com/jdamon96/lacuna/releases/download/v0.4.0/Lacuna-0.4.0-universal.zip" sparkle:edSignature="o07ca+QIVGOg7FeKZhQ2IplcFe+sngqRLSuCRXAZVke0/Yh8rqSOiU3xjO8Xj8SIq7BHs3d98Kne7pJvM7NaCg==" length="2016916" type="application/octet-stream"></enclosure>
+    </item>
+    <item>
       <title>Lacuna 0.3.1</title>
       <link>https://github.com/jdamon96/lacuna/releases/tag/v0.3.1</link>
       <sparkle:version>6</sparkle:version>
@@ -36,6 +50,6 @@ This is the first version with an updater. Versions 0.2.x need one manual instal
     </item>
   </channel>
 </rss><!-- sparkle-signatures:
-edSignature: qO0q0RDAZrSMUKPyBU7t5lb1+iiUIhVTrGM3DBPdGGp62CD+9zZKwb0cAr7WDZ826hE078LjxWjKlj6q+r1bDw==
-length: 2845
+edSignature: Apq8hi+/qPUrpdMefir8wwN1trSChBuQJi2cGp+wQHCapEsWnyI3x53uuKq60K+4Yf8orAciIy8Hk+s3rPRiDQ==
+length: 4199
 -->
