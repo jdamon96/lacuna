@@ -27,11 +27,21 @@ public struct SuggestionCacheKey: Hashable, Sendable {
     }
 }
 
+public struct SuggestionCacheResult: Sendable, Equatable {
+    public let suggestions: [String]
+    public let feedback: [String]
+
+    public init(suggestions: [String], feedback: [String]) {
+        self.suggestions = suggestions
+        self.feedback = feedback
+    }
+}
+
 /// A bounded, session-only cache. Reads refresh recency; no content is persisted.
 public struct SuggestionCache: Sendable {
     private struct Entry: Sendable {
         let key: SuggestionCacheKey
-        let suggestions: [String]
+        let result: SuggestionCacheResult
     }
 
     private let capacity: Int
@@ -44,16 +54,20 @@ public struct SuggestionCache: Sendable {
     public var count: Int { entries.count }
 
     public mutating func suggestions(for key: SuggestionCacheKey) -> [String]? {
+        result(for: key)?.suggestions
+    }
+
+    public mutating func result(for key: SuggestionCacheKey) -> SuggestionCacheResult? {
         guard let index = entries.firstIndex(where: { $0.key == key }) else { return nil }
         let entry = entries.remove(at: index)
         entries.append(entry)
-        return entry.suggestions
+        return entry.result
     }
 
-    public mutating func store(_ suggestions: [String], for key: SuggestionCacheKey) {
+    public mutating func store(_ options: [String], feedback: [String] = [], for key: SuggestionCacheKey) {
         guard capacity > 0 else { return }
         remove(for: key)
-        entries.append(Entry(key: key, suggestions: suggestions))
+        entries.append(Entry(key: key, result: SuggestionCacheResult(suggestions: options, feedback: feedback)))
         if entries.count > capacity { entries.removeFirst() }
     }
 

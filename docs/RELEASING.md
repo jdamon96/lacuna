@@ -11,7 +11,7 @@ For a fork, resolve dependencies with `swift package resolve`, then run `.build/
 ## Build and publish
 
 1. Increase the marketing version and integer build number in `Resources/Info.plist` and the script defaults. Each published build number and archive URL is immutable.
-2. Run `swift test`, `scripts/tests/test-highlight-geometry.sh`, `scripts/tests/test-highlight-panel.sh`, and `python3 scripts/tests/test_update_appcast.py`.
+2. Run `swift test`, `scripts/tests/test-highlight-geometry.sh`, `scripts/tests/test-highlight-panel.sh`, `scripts/tests/test-refinement-panel.sh`, and `python3 scripts/tests/test_update_appcast.py`.
 3. Put concise plain-text release notes in a file, then run:
 
    ```sh

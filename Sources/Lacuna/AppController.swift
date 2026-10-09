@@ -33,6 +33,9 @@ final class AppController: NSObject, NSApplicationDelegate {
     private var input: CapturedInput?
     private var template: BraceTemplate?
     private var sequence: TemplateSequence?
+    private var feedbackHistory: [String] = []
+    private var feedbackDraft = ""
+    private var returningFromRefinement = false
     private var localMonitor: Any?
     private var triggerMonitor: Any?
     private var lastInvocation: TimeInterval = 0
@@ -64,7 +67,10 @@ final class AppController: NSObject, NSApplicationDelegate {
         panel.state.choose = { [weak self] in self?.accept($0) }
         panel.state.dismiss = { [weak self] in self?.dismiss() }
         panel.state.copySelected = { [weak self] in self?.copySelected() }
-        panel.state.regenerate = { [weak self] in self?.beginSuggestions(refresh: true) }
+        panel.state.regenerate = { [weak self] in self?.regenerateSuggestions() }
+        panel.state.refine = { [weak self] in self?.beginRefinement() }
+        panel.state.submitFeedback = { [weak self] in self?.submitRefinement($0) }
+        panel.state.cancelRefinement = { [weak self] in self?.cancelRefinement() }
         keyboard.onKey = { [weak self] code, flags in
             guard let self, !self.isShortcut(code, flags: flags) else { return false }
             return self.handleKey(code, modified: !flags.intersection([.maskCommand, .maskControl, .maskAlternate, .maskShift]).isEmpty,
@@ -326,23 +332,12 @@ final class AppController: NSObject, NSApplicationDelegate {
         if request != nil || !panel.state.options.isEmpty { dismiss(); return }
         beginSuggestions()
     }
-    private func beginSuggestions(refresh: Bool = false) {
+    private func beginSuggestions() {
         guard preferences.enabled, !isRecordingShortcut, insertion == nil else { return }
-        let previousInput = input
-        let previousSequence = sequence
         dismiss(); highlight.hide()
         do {
             let input = try capture()
-            let sequence: TemplateSequence
-            if refresh {
-                guard let previousInput, let previousSequence,
-                      sameEditor(input, previousInput), previousSequence.isValid(in: input.text) else {
-                    throw AccessibilityBridgeError.changedText
-                }
-                sequence = previousSequence
-            } else {
-                sequence = TemplateSequence(text: input.text)
-            }
+            let sequence = TemplateSequence(text: input.text)
             guard sequence.current != nil else {
                 if let opening = BraceTemplate.pendingOpening(in: input.text, selection: input.selection) {
                     showMessage("Close the instruction with } to get suggestions.", anchor: bounds(opening, in: input) ?? input.anchor)
@@ -351,52 +346,161 @@ final class AppController: NSObject, NSApplicationDelegate {
                 }
                 return
             }
-            presentSuggestions(in: input, sequence: sequence, refresh: refresh)
+            presentSuggestions(in: input, sequence: sequence)
         } catch { showMessage(error.localizedDescription, anchor: nil) }
     }
 
-    private func presentSuggestions(in input: CapturedInput, sequence: TemplateSequence, refresh: Bool = false) {
+    private func cacheKey(in input: CapturedInput, template: BraceTemplate, configuration: LLMConfiguration) -> SuggestionCacheKey {
+        let scope: String?
+        if let external = input.external { scope = "ax:\(external.pid):\(CFHash(external.element))" }
+        else if let local = input.local { scope = "local:\(ObjectIdentifier(local))" }
+        else { scope = nil }
+        return SuggestionCacheKey(text: input.text, template: template, configuration: configuration, editorScope: scope)
+    }
+
+    private func suggestionAnchor(in input: CapturedInput, template: BraceTemplate) -> CGRect? {
+        let rects = showHighlights(in: input, active: template.range)
+        return rects.isEmpty ? bounds(template.range, in: input) ?? input.anchor
+            : rects.dropFirst().reduce(rects[0]) { $0.union($1) }
+    }
+
+    private func presentSuggestions(in input: CapturedInput, sequence: TemplateSequence) {
         guard let template = sequence.current(in: input.text) else { dismiss(); return }
         self.input = input; self.template = template; self.sequence = sequence
-        let rects = showHighlights(in: input, active: template.range)
+        feedbackHistory = []; feedbackDraft = ""
         // Anchor below all visible fragments, so the chooser doesn't cover a
         // continuation line of the phrase being filled.
-        let anchor = rects.isEmpty ? bounds(template.range, in: input) ?? input.anchor
-            : rects.dropFirst().reduce(rects[0]) { $0.union($1) }
+        let anchor = suggestionAnchor(in: input, template: template)
         let number = sequence.completedCount + 1
         let count = sequence.totalCount
         let configuration = preferences.configuration
-        let cacheKey = SuggestionCacheKey(text: input.text, template: template, configuration: configuration)
-        if !refresh, let cached = suggestions.suggestions(for: cacheKey) {
-            panel.show(instruction: template.instruction, anchor: anchor, options: cached, phraseNumber: number, phraseCount: count)
+        let cacheKey = cacheKey(in: input, template: template, configuration: configuration)
+        if let cached = suggestions.result(for: cacheKey) {
+            feedbackHistory = cached.feedback
+            panel.show(instruction: template.instruction, anchor: anchor, options: cached.suggestions, phraseNumber: number, phraseCount: count)
             startKeyboard(local: input.local != nil)
             return
         }
         panel.show(instruction: template.instruction, anchor: anchor, loading: true, phraseNumber: number, phraseCount: count)
         startKeyboard(local: input.local != nil)
+        generateSuggestions(in: input, sequence: sequence)
+    }
+
+    private func generateSuggestions(in input: CapturedInput, sequence: TemplateSequence, refinement: SuggestionRefinement? = nil) {
+        guard let template = sequence.current(in: input.text) else { dismiss(); return }
+        self.input = input
+        let configuration = preferences.configuration
+        let cacheKey = cacheKey(in: input, template: template, configuration: configuration)
+        let previousOptions = panel.state.options
+        panel.state.loading = true; panel.state.message = ""
+        panel.refresh()
         let id = UUID(); requestID = id
         request = Task { @MainActor [weak self] in
             do {
-                let suggestions = try await CompletionClient().suggestions(for: template, in: input.text, configuration: configuration)
+                let suggestions = try await CompletionClient().suggestions(for: template, in: input.text, configuration: configuration, refinement: refinement)
                 guard let self, !Task.isCancelled, self.requestID == id else { return }
                 self.request = nil
-                self.suggestions.store(suggestions, for: cacheKey)
                 guard let current = self.matchingInput(input) else { self.dismiss(); return }
-                let currentRects = self.showHighlights(in: current, active: template.range)
-                let currentAnchor = currentRects.isEmpty ? self.bounds(template.range, in: current) ?? current.anchor
-                    : currentRects.dropFirst().reduce(currentRects[0]) { $0.union($1) }
-                self.panel.show(instruction: template.instruction, anchor: currentAnchor, options: suggestions, phraseNumber: number, phraseCount: count)
+                self.feedbackHistory = refinement?.feedback ?? []
+                self.feedbackDraft = ""
+                self.suggestions.store(suggestions, feedback: self.feedbackHistory, for: cacheKey)
+                let currentAnchor = self.suggestionAnchor(in: current, template: template)
+                self.panel.show(instruction: template.instruction, anchor: currentAnchor, options: suggestions,
+                                phraseNumber: sequence.completedCount + 1, phraseCount: sequence.totalCount)
             } catch {
                 guard let self, !Task.isCancelled, self.requestID == id else { return }
-                self.dismiss()
-                self.showMessage(error.localizedDescription, anchor: anchor)
+                self.request = nil
+                if !previousOptions.isEmpty, self.matches(input) {
+                    self.panel.state.loading = false
+                    self.panel.state.message = error.localizedDescription + " Your previous options are still available."
+                    self.panel.refresh()
+                } else {
+                    self.dismiss()
+                    self.showMessage(error.localizedDescription, anchor: input.anchor)
+                }
             }
         }
     }
+
+    private func regenerateSuggestions() {
+        guard !panel.state.loading, !panel.state.isRefining, insertion == nil,
+              let input, let sequence, let current = matchingInput(input),
+              sequence.isValid(in: current.text), !panel.state.options.isEmpty else { return }
+        do {
+            let refinement = feedbackHistory.isEmpty ? nil
+                : try SuggestionRefinement(previousSuggestions: panel.state.options, feedback: feedbackHistory)
+            generateSuggestions(in: current, sequence: sequence, refinement: refinement)
+        } catch { panel.state.message = error.localizedDescription; panel.refresh() }
+    }
+
+    private func beginRefinement() {
+        guard !panel.state.loading, !panel.state.isRefining, insertion == nil,
+              panel.state.canInsert, !panel.state.options.isEmpty,
+              let input, matchingInput(input) != nil else { return }
+        stopKeyboard()
+        requestID = UUID()
+        let id = requestID
+        returningFromRefinement = true
+        panel.state.message = ""
+        panel.beginRefinement(feedback: feedbackDraft)
+        DispatchQueue.main.async { [weak self] in
+            guard let self, self.requestID == id, self.panel.state.isRefining else { return }
+            self.returningFromRefinement = false
+            // A key panel alone is not enough: the native field editor must own
+            // typing. If it could not focus, return to the unchanged options.
+            if !self.panel.isRefinementKey { self.cancelRefinement() }
+        }
+    }
+
+    private func submitRefinement(_ feedback: String) {
+        guard panel.state.isRefining, let sequence, !panel.state.options.isEmpty else { return }
+        feedbackDraft = feedback
+        do {
+            let refinement = try SuggestionRefinement(previousSuggestions: panel.state.options,
+                                                      feedback: feedbackHistory + [feedback])
+            returnFromRefinement { [weak self] current in
+                self?.generateSuggestions(in: current, sequence: sequence, refinement: refinement)
+            }
+        } catch { panel.state.message = error.localizedDescription; panel.refresh() }
+    }
+
+    private func cancelRefinement() {
+        if panel.state.isRefining {
+            feedbackDraft = panel.state.feedback
+            returnFromRefinement { _ in }
+        } else if panel.state.loading, !panel.state.options.isEmpty {
+            requestID = UUID(); request?.cancel(); request = nil
+            panel.state.loading = false; panel.state.message = ""
+            panel.refresh()
+        }
+    }
+
+    private func returnFromRefinement(_ completion: @escaping (CapturedInput) -> Void) {
+        guard let original = input else { dismiss(); return }
+        let id = requestID
+        returningFromRefinement = true
+        panel.endRefinement()
+        // Let AppKit return key focus to the editor before validating the exact
+        // field, value, and caret. Never reactivate or retarget an external app.
+        DispatchQueue.main.async { [weak self] in
+            guard let self, self.requestID == id else { return }
+            self.returningFromRefinement = false
+            guard let current = self.matchingInput(original) else { self.dismiss(); return }
+            self.panel.state.message = ""
+            self.panel.refresh()
+            self.startKeyboard(local: current.local != nil)
+            completion(current)
+        }
+    }
+
     private func poll() {
         guard preferences.enabled else { highlight.hide(); return }
         // Insertion deliberately changes the selected range before changing the text.
-        guard insertion == nil else { return }
+        guard insertion == nil, !returningFromRefinement else { return }
+        if panel.state.isRefining {
+            if !panel.ownsRefinementFocus { dismiss() }
+            return
+        }
         if let input {
             if let current = matchingInput(input), let template {
                 let rects = showHighlights(in: current, active: template.range)
@@ -424,27 +528,44 @@ final class AppController: NSObject, NSApplicationDelegate {
         }
     }
     private func stopKeyboard() { keyboard.stop(); if let localMonitor { NSEvent.removeMonitor(localMonitor) }; localMonitor = nil }
+    private func enqueueChooserAction(_ action: @escaping (AppController) -> Void) {
+        let id = requestID
+        DispatchQueue.main.async { [weak self] in
+            guard let self, self.requestID == id, !self.panel.state.isRefining,
+                  !self.returningFromRefinement else { return }
+            action(self)
+        }
+    }
     private func handleKey(_ code: UInt16, modified: Bool, commandOnly: Bool) -> Bool {
-        if code == 53 { DispatchQueue.main.async { [weak self] in self?.dismiss() }; return true }
+        if code == 53 {
+            enqueueChooserAction { controller in
+                if controller.panel.state.loading, !controller.panel.state.options.isEmpty { controller.cancelRefinement() }
+                else { controller.dismiss() }
+            }
+            return true
+        }
         if commandOnly, !panel.state.options.isEmpty {
             if code == 8 { copySelected(); return true }
             if code == 15 {
-                DispatchQueue.main.async { [weak self] in self?.beginSuggestions(refresh: true) }
+                enqueueChooserAction { $0.regenerateSuggestions() }
                 return true
             }
         }
         guard !modified else { dismiss(); return false }
-        if panel.state.loading, panel.state.options.isEmpty,
-           [18, 19, 20, 83, 84, 85, 36, 76, 48, 125, 126].contains(code) {
+        if panel.state.loading,
+           [18, 19, 20, 83, 84, 85, 36, 76, 48, 124, 125, 126].contains(code) {
             // A repeated choice key between phrases must not type into the
             // editor (or submit its form) while the next options are loading.
             return true
         }
         let options = panel.state.options
         if !options.isEmpty {
+            if code == 124 {
+                enqueueChooserAction { $0.beginRefinement() }; return true
+            }
             let numbers: [UInt16: Int] = [18: 0, 19: 1, 20: 2, 83: 0, 84: 1, 85: 2]
             if let index = numbers[code], index < options.count {
-                DispatchQueue.main.async { [weak self] in self?.accept(index) }; return true
+                enqueueChooserAction { $0.accept(index) }; return true
             }
             if code == 125 || code == 126 || code == 48 {
                 let delta = code == 126 ? -1 : 1
@@ -453,13 +574,13 @@ final class AppController: NSObject, NSApplicationDelegate {
             }
             if code == 36 || code == 76 {
                 let selected = panel.state.selected
-                DispatchQueue.main.async { [weak self] in self?.accept(selected) }; return true
+                enqueueChooserAction { $0.accept(selected) }; return true
             }
         }
         dismiss(); return false
     }
     private func accept(_ index: Int) {
-        guard insertion == nil, panel.state.canInsert,
+        guard insertion == nil, !panel.state.loading, !panel.state.isRefining, panel.state.canInsert,
               let input, let template, panel.state.options.indices.contains(index) else { return }
         let replacement = panel.state.options[index]
         // Stop intercepting before posting any insertion events.
@@ -538,6 +659,7 @@ final class AppController: NSObject, NSApplicationDelegate {
         // clipboard restoration. No new insertion may overlap that cleanup.
         insertion?.cancel()
         input = nil; template = nil; sequence = nil
+        feedbackHistory = []; feedbackDraft = ""; returningFromRefinement = false
         dismissWork?.cancel(); dismissWork = nil
         stopKeyboard(); panel.hide(); panel.state.options = []; highlight.hide()
     }

@@ -7,6 +7,22 @@ final class PassivePanel: NSPanel {
     override var canBecomeMain: Bool { false }
 }
 
+final class SuggestionPanel: NSPanel {
+    var allowsRefinementFocus = false
+    var cancelRefinement: (() -> Void)?
+    override var canBecomeKey: Bool { allowsRefinementFocus }
+    override var canBecomeMain: Bool { false }
+
+    override func cancelOperation(_ sender: Any?) {
+        guard allowsRefinementFocus else { super.cancelOperation(sender); return }
+        // Text editing gets the first chance to interpret Escape. If an input
+        // method leaves a cancel command on the responder chain, it must still
+        // not dismiss the refinement while composed text remains marked.
+        guard (firstResponder as? NSTextView)?.hasMarkedText() != true else { return }
+        cancelRefinement?()
+    }
+}
+
 final class SuggestionState: ObservableObject {
     @Published var instruction = ""
     @Published var phraseNumber = 0
@@ -17,11 +33,18 @@ final class SuggestionState: ObservableObject {
     @Published var loading = false
     @Published var isInserting = false
     @Published var canInsert = true
+    @Published var isRefining = false
+    @Published var feedback = ""
     @Published var maximumPanelHeight: CGFloat = 490
     var choose: ((Int) -> Void)?
     var dismiss: (() -> Void)?
     var copySelected: (() -> Void)?
     var regenerate: (() -> Void)?
+    var refine: (() -> Void)?
+    var submitFeedback: ((String) -> Void)?
+    var cancelRefinement: (() -> Void)?
+    fileprivate var focusFeedback: (() -> Void)?
+    fileprivate weak var feedbackField: NSTextField?
     var navigate: ((_ direction: Int, _ jump: Bool) -> Void)?
 }
 
@@ -40,7 +63,7 @@ private struct SuggestionRow: View {
 
     var body: some View {
         Button {
-            guard !state.isInserting else { return }
+            guard !state.isInserting, !state.loading, !state.isRefining else { return }
             if state.canInsert { state.choose?(index) }
             else { state.selected = index }
         } label: {
@@ -57,7 +80,7 @@ private struct SuggestionRow: View {
             .background(index == state.selected ? Color.indigo.opacity(0.11) : Color.primary.opacity(0.025), in: RoundedRectangle(cornerRadius: 9))
             .overlay(RoundedRectangle(cornerRadius: 9).stroke(index == state.selected ? Color.indigo.opacity(0.25) : .clear, lineWidth: 1))
         }.buttonStyle(SuggestionButtonStyle())
-        .disabled(state.isInserting)
+        .disabled(state.isInserting || state.loading || state.isRefining)
         .accessibilityLabel("Option \(index + 1): \(option)")
         .frame(width: width)
     }
@@ -162,6 +185,66 @@ private struct SuggestionList: NSViewRepresentable {
     }
 }
 
+/// Use the AppKit field editor for selection, paste, composed input, and IME.
+/// Only interpreted submit/cancel commands leave ordinary text editing.
+private struct RefinementInput: NSViewRepresentable {
+    @ObservedObject var state: SuggestionState
+
+    final class Coordinator: NSObject, NSTextFieldDelegate {
+        let state: SuggestionState
+        init(state: SuggestionState) { self.state = state }
+
+        func controlTextDidChange(_ notification: Notification) {
+            guard let field = notification.object as? NSTextField else { return }
+            state.feedback = field.stringValue
+        }
+
+        func control(_ control: NSControl, textView: NSTextView, doCommandBy commandSelector: Selector) -> Bool {
+            // Return and Escape first belong to an in-progress input method.
+            guard !textView.hasMarkedText() else { return false }
+            if commandSelector == #selector(NSResponder.insertNewline(_:)) {
+                let feedback = textView.string.trimmingCharacters(in: .whitespacesAndNewlines)
+                if !feedback.isEmpty { state.submitFeedback?(feedback) }
+                return true
+            }
+            if commandSelector == #selector(NSResponder.cancelOperation(_:)) {
+                state.cancelRefinement?()
+                return true
+            }
+            return false
+        }
+    }
+
+    func makeCoordinator() -> Coordinator { Coordinator(state: state) }
+    func makeNSView(context: Context) -> NSTextField {
+        let field = NSTextField(string: state.feedback)
+        field.placeholderString = "What should change?"
+        field.font = .systemFont(ofSize: 13)
+        field.isEditable = true; field.isSelectable = true
+        field.isBezeled = true; field.bezelStyle = .roundedBezel
+        field.focusRingType = .exterior
+        field.delegate = context.coordinator
+        field.setAccessibilityLabel("Refinement feedback")
+        state.feedbackField = field
+        state.focusFeedback = { [weak field] in
+            guard let field, let window = field.window, window.isKeyWindow else { return }
+            if field.currentEditor() == nil { window.makeFirstResponder(field); field.selectText(nil) }
+        }
+        DispatchQueue.main.async { state.focusFeedback?() }
+        return field
+    }
+    func updateNSView(_ field: NSTextField, context: Context) {
+        // Reassigning the value during an edit would discard marked text and
+        // move the caret. AppKit already owns the current value in that case.
+        if field.currentEditor() == nil, field.stringValue != state.feedback { field.stringValue = state.feedback }
+        state.feedbackField = field
+        state.focusFeedback = { [weak field] in
+            guard let field, let window = field.window, window.isKeyWindow else { return }
+            if field.currentEditor() == nil { window.makeFirstResponder(field); field.selectText(nil) }
+        }
+    }
+}
+
 struct SuggestionView: View {
     @ObservedObject var state: SuggestionState
 
@@ -170,7 +253,9 @@ struct SuggestionView: View {
         // The list compresses instead of pushing its keyboard footer off-screen.
         let instruction = min(32, textHeight(state.instruction))
         let status = state.message.isEmpty ? 0 : textHeight(state.message) + 44
-        let chrome = 20 + instruction + 32 + 36 + (state.isInserting ? 17 : 14)
+        let feedback: CGFloat = state.isRefining ? 42 : 0
+        let footer: CGFloat = state.isInserting || state.loading ? 17 : (state.isRefining ? 14 : 38)
+        let chrome = 20 + instruction + 32 + 36 + footer + feedback
         return min(330, max(60, state.maximumPanelHeight - chrome - status))
     }
 
@@ -192,9 +277,12 @@ struct SuggestionView: View {
                         .font(.system(size: 12)).foregroundStyle(.secondary)
                 }
                 Spacer()
-                Button { state.dismiss?() } label: {
+                Button {
+                    if state.isRefining || (state.loading && !state.options.isEmpty) { state.cancelRefinement?() }
+                    else { state.dismiss?() }
+                } label: {
                     Text("esc").font(.system(size: 11, design: .monospaced)).foregroundStyle(.secondary)
-                }.buttonStyle(.plain).accessibilityLabel("Dismiss suggestions")
+                }.buttonStyle(.plain).accessibilityLabel(state.isRefining || (state.loading && !state.options.isEmpty) ? "Return to suggestions" : "Dismiss suggestions")
             }
             Text(state.instruction).font(.system(size: 13)).foregroundStyle(.secondary).lineLimit(2)
             if state.loading && state.options.isEmpty {
@@ -213,30 +301,52 @@ struct SuggestionView: View {
                                 Text("Copy selected")
                                 Text("⌘C").foregroundStyle(.secondary)
                             }
-                        }.controlSize(.small).disabled(state.isInserting)
+                        }.controlSize(.small).disabled(state.isInserting || state.loading || state.isRefining)
                     }
                 }
                 // Keep this view in place while status changes so AppKit retains
                 // its document, selected option, and current reading position.
                 SuggestionList(state: state).frame(maxHeight: suggestionHeight)
-                HStack(spacing: 8) {
+                if state.isRefining {
+                    HStack(spacing: 8) {
+                        RefinementInput(state: state).frame(height: 28)
+                        Button("Refine") {
+                            let feedback = state.feedback.trimmingCharacters(in: .whitespacesAndNewlines)
+                            if !feedback.isEmpty { state.submitFeedback?(feedback) }
+                        }.disabled(state.feedback.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                    }
+                }
+                VStack(alignment: .leading, spacing: 8) {
                     if state.isInserting {
-                        ProgressView().controlSize(.mini)
-                        Text("Inserting…")
+                        HStack(spacing: 8) { ProgressView().controlSize(.mini); Text("Inserting…") }
+                    } else if state.loading {
+                        HStack(spacing: 8) {
+                            ProgressView().controlSize(.mini)
+                            Text("Refining suggestions…")
+                            Spacer()
+                            Text("esc back")
+                        }
+                    } else if state.isRefining {
+                        Text("↵ refine  ·  esc back to suggestions")
                     } else {
                         Text(state.canInsert
                              ? "1–3 insert  ·  ↑↓ read  ·  tab next  ·  ↵ accept"
                              : "↑↓ read  ·  ⌘C copy  ·  esc dismiss")
-                    }
-                    Spacer(minLength: 0)
-                    Button { state.regenerate?() } label: {
-                        HStack(spacing: 3) {
-                            Image(systemName: "arrow.clockwise")
-                            Text("⌘R")
+                        HStack {
+                            Button { state.refine?() } label: {
+                                Text("Refine →")
+                            }.buttonStyle(.plain).help("Refine suggestions (Right arrow)")
+                                .accessibilityLabel("Refine suggestions")
+                            Spacer(minLength: 0)
+                            Button { state.regenerate?() } label: {
+                                HStack(spacing: 3) {
+                                    Image(systemName: "arrow.clockwise")
+                                    Text("New ⌘R")
+                                }
+                            }.buttonStyle(.plain).help("New suggestions (⌘R)")
+                                .accessibilityLabel("New suggestions")
                         }
-                    }.buttonStyle(.plain).disabled(state.isInserting)
-                        .help("New suggestions (⌘R)")
-                        .accessibilityLabel("New suggestions")
+                    }
                 }.font(.system(size: 11)).foregroundStyle(.secondary)
             } else if !state.message.isEmpty {
                 Text(state.message).font(.system(size: 13)).fixedSize(horizontal: false, vertical: true).padding(.vertical, 8)
@@ -251,20 +361,30 @@ struct SuggestionView: View {
 
 final class FloatingPanel {
     let state = SuggestionState()
-    private let panel: PassivePanel
+    private let panel: SuggestionPanel
     private var anchor: CGRect?
+    private weak var priorKeyWindow: NSWindow?
+    private weak var priorFirstResponder: NSResponder?
     var isVisible: Bool { panel.isVisible }
+    var ownsRefinementFocus: Bool { state.isRefining && panel.isKeyWindow }
+    var isRefinementKey: Bool {
+        state.isRefining && panel.isKeyWindow && state.feedbackField?.currentEditor() != nil
+            && state.feedbackField?.currentEditor() === panel.firstResponder
+    }
 
     init() {
-        panel = PassivePanel(contentRect: .zero, styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
+        panel = SuggestionPanel(contentRect: .zero, styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
+        panel.cancelRefinement = { [weak state] in state?.cancelRefinement?() }
         panel.isFloatingPanel = true; panel.level = .popUpMenu
         panel.backgroundColor = .clear; panel.isOpaque = false; panel.hasShadow = true
         panel.hidesOnDeactivate = false; panel.isReleasedWhenClosed = false
+        panel.animationBehavior = .none
         panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .ignoresCycle]
         panel.contentView = NSHostingView(rootView: SuggestionView(state: state))
     }
     func show(instruction: String, anchor: CGRect?, loading: Bool = false, options: [String] = [], message: String = "",
               phraseNumber: Int = 0, phraseCount: Int = 0) {
+        finishRefinement(reopen: false)
         state.instruction = instruction; state.loading = loading; state.options = options
         state.phraseNumber = phraseNumber; state.phraseCount = phraseCount
         state.message = message; state.selected = 0; state.isInserting = false; state.canInsert = true
@@ -281,7 +401,39 @@ final class FloatingPanel {
         refreshLayout()
         panel.orderFrontRegardless()
     }
-    func hide() { panel.orderOut(nil) }
+    func beginRefinement(feedback: String) {
+        guard !state.options.isEmpty, !state.isInserting, !state.loading else { return }
+        if !state.isRefining {
+            priorKeyWindow = NSApp.isActive ? NSApp.keyWindow : nil
+            priorFirstResponder = priorKeyWindow?.firstResponder
+        }
+        state.feedback = feedback; state.isRefining = true
+        panel.allowsRefinementFocus = true
+        refreshLayout()
+        panel.makeKeyAndOrderFront(nil)
+        DispatchQueue.main.async { [weak self] in
+            guard let self, self.state.isRefining else { return }
+            self.position()
+            self.state.focusFeedback?()
+        }
+    }
+    func endRefinement() { finishRefinement(reopen: true) }
+    private func finishRefinement(reopen: Bool) {
+        guard state.isRefining || panel.allowsRefinementFocus else { return }
+        let restoreLocalFocus = panel.isKeyWindow && NSApp.isActive
+        panel.makeFirstResponder(nil)
+        panel.orderOut(nil)
+        panel.allowsRefinementFocus = false
+        state.isRefining = false; state.focusFeedback = nil
+        if restoreLocalFocus, let window = priorKeyWindow, window.isVisible {
+            window.makeKey()
+            if let responder = priorFirstResponder { window.makeFirstResponder(responder) }
+        }
+        priorKeyWindow = nil; priorFirstResponder = nil
+        if reopen { refreshLayout(); panel.orderFrontRegardless() }
+    }
+    func refresh() { refreshLayout() }
+    func hide() { finishRefinement(reopen: false); panel.orderOut(nil) }
     func reanchor(_ anchor: CGRect?) {
         guard self.anchor != anchor else { return }
         self.anchor = anchor

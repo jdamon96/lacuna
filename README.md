@@ -27,11 +27,13 @@ From version 0.3.0, choose **Check for Updates…** in Lacuna’s menu to downlo
 
 Use **↑/↓** to scroll long suggestions, **Tab** to move to the next option, and **Return** to accept the selected option. Reopening an unchanged template brings back its previous options. Press **⌘R** in the popup for new suggestions, or **⌘C** to copy the selected option. If insertion fails, the options stay open.
 
+To refine the options, press **→**, type feedback such as “make it more casual and concise,” and press **Return**. Lacuna revises the same phrase using the current options and your feedback. Repeat as needed, then choose **1–3** to insert. **Escape** cancels feedback or a pending revision and keeps the previous options.
+
 Use single braces. You can change the shortcut, provider, and model in settings. OpenAI and Anthropic use their respective native APIs. Choose **OpenAI-compatible** to configure a custom or local server with a Chat Completions API.
 
 ## Privacy and compatibility
 
-Brace detection happens locally in the focused text field. Text is sent directly to your configured provider only when you request suggestions. API keys stay in macOS Keychain. The last 20 sets of suggestions are kept in memory until you quit or save settings; prompts and suggestions are never saved to disk. There is no Lacuna server or analytics.
+Brace detection happens locally in the focused text field. Text is sent directly to your configured provider only when you request suggestions. Refinements also send the current options and your feedback for that phrase. API keys stay in macOS Keychain. The last 20 sets of suggestions are kept in memory until you quit or save settings; prompts, suggestions, and feedback are never saved to disk. There is no Lacuna server or analytics.
 
 Updates use [Sparkle](https://sparkle-project.org/) and GitHub, with signed release metadata and archives verified before installation. Update checks do not send your editor text or API keys; system profiling is disabled.
 
@@ -49,7 +51,7 @@ cd lacuna
 
 This builds, installs to `~/Applications`, and opens Lacuna. Use `./scripts/build.sh` to build only, `swift test` to run tests, or `./scripts/release.sh` to create a universal DMG and ZIP in `dist/` (requires full Xcode).
 
-Release scripts default to version `0.4.1`, build `8`; override them with `--version` and `BUILD_NUMBER`. Releases require the Sparkle signing key; ordinary builds do not. See [Publishing releases](docs/RELEASING.md) for signing and updating the feed. Nothing is published automatically.
+Release scripts default to version `0.5.0`, build `9`; override them with `--version` and `BUILD_NUMBER`. Releases require the Sparkle signing key; ordinary builds do not. See [Publishing releases](docs/RELEASING.md) for signing and updating the feed. Nothing is published automatically.
 
 ## License
 

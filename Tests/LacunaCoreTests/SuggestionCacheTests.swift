@@ -59,18 +59,68 @@ final class SuggestionCacheTests: XCTestCase {
     }
 
     func testReadsRefreshRecencyAndEvictionKeepsMostRecentlyUsedEntries() throws {
-        var cache = SuggestionCache(capacity: 2)
         let first = try key("First {greeting}")
         let second = try key("Second {greeting}")
         let third = try key("Third {greeting}")
-        cache.store(candidates, for: first)
-        cache.store(candidates, for: second)
-        XCTAssertEqual(cache.suggestions(for: first), candidates)
-        cache.store(candidates, for: third)
-        XCTAssertNil(cache.suggestions(for: second))
-        XCTAssertEqual(cache.suggestions(for: first), candidates)
-        XCTAssertEqual(cache.suggestions(for: third), candidates)
-        XCTAssertEqual(cache.count, 2)
+        let result = SuggestionCacheResult(suggestions: candidates, feedback: ["Make it warmer."])
+        for useFullResult in [false, true] {
+            var cache = SuggestionCache(capacity: 2)
+            cache.store(result.suggestions, feedback: result.feedback, for: first)
+            cache.store(candidates, for: second)
+            if useFullResult {
+                XCTAssertEqual(cache.result(for: first), result)
+            } else {
+                XCTAssertEqual(cache.suggestions(for: first), candidates)
+            }
+            cache.store(candidates, for: third)
+            XCTAssertNil(cache.result(for: second))
+            XCTAssertEqual(cache.result(for: first), result)
+            XCTAssertEqual(cache.suggestions(for: third), candidates)
+            XCTAssertEqual(cache.count, 2)
+        }
+    }
+
+    func testResultPreservesSuggestionsAndOrderedFeedbackTogether() throws {
+        let key = try key(text)
+        let feedback = ["Make it warmer.", "Keep it to one sentence."]
+        let expected = SuggestionCacheResult(suggestions: candidates, feedback: feedback)
+        var cache = SuggestionCache()
+        cache.store(candidates, feedback: feedback, for: key)
+        XCTAssertEqual(cache.result(for: key), expected)
+        XCTAssertEqual(cache.suggestions(for: key), candidates)
+        XCTAssertEqual(cache.result(for: key), expected)
+    }
+
+    func testReplacementResetsFeedbackByDefaultAndReplacesExplicitFeedback() throws {
+        let key = try key(text)
+        let replacement = ["A", "B", "C"]
+        var cache = SuggestionCache()
+        cache.store(candidates, feedback: ["Old feedback"], for: key)
+        cache.store(replacement, for: key)
+        XCTAssertEqual(cache.result(for: key), SuggestionCacheResult(suggestions: replacement, feedback: []))
+        cache.store(candidates, feedback: ["New feedback"], for: key)
+        XCTAssertEqual(cache.result(for: key), SuggestionCacheResult(suggestions: candidates, feedback: ["New feedback"]))
+        XCTAssertEqual(cache.count, 1)
+    }
+
+    func testFeedbackResultsStayIsolatedByEditorProviderAndModel() throws {
+        let template = try XCTUnwrap(BraceTemplate.find(in: text, selection: NSRange(location: 7, length: 0)))
+        let keys = [
+            SuggestionCacheKey(text: text, template: template, configuration: configuration, editorScope: "editor-a"),
+            SuggestionCacheKey(text: text, template: template, configuration: configuration, editorScope: "editor-b"),
+            SuggestionCacheKey(text: text, template: template,
+                configuration: LLMConfiguration(provider: .anthropic, baseURL: configuration.baseURL, model: configuration.model), editorScope: "editor-a"),
+            SuggestionCacheKey(text: text, template: template,
+                configuration: LLMConfiguration(provider: .openAI, model: "another-model"), editorScope: "editor-a")
+        ]
+        var cache = SuggestionCache()
+        for (index, key) in keys.enumerated() {
+            cache.store(["Option \(index)"], feedback: ["Feedback \(index)"], for: key)
+        }
+        for (index, key) in keys.enumerated() {
+            XCTAssertEqual(cache.result(for: key), SuggestionCacheResult(
+                suggestions: ["Option \(index)"], feedback: ["Feedback \(index)"]))
+        }
     }
 
     func testReplacingRemovingAndClearingEntries() throws {

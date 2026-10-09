@@ -5,6 +5,79 @@ final class CompletionClientTests: XCTestCase {
     private let text = "Hello {a warm welcome} and thanks."
     private var template: BraceTemplate { BraceTemplate.find(in: text, selection: NSRange(location: 7, length: 0))! }
 
+    func testRefinementCarriesCurrentOptionsAndOrderedFeedbackAcrossEveryProvider() throws {
+        let refinement = try SuggestionRefinement(previousSuggestions: ["Warm welcome", "Happy to see you", "Please come in"],
+            feedback: ["Make these more formal.", "Actually use a casual tone, but keep them short."])
+        for provider in LLMProvider.allCases {
+            let configuration = LLMConfiguration(provider: provider, model: "test-model", apiKey: "test-key")
+            let client = CompletionClient()
+            let original = try client.makeRequest(for: template, in: text, configuration: configuration)
+            let request = try client.makeRequest(for: template, in: text, configuration: configuration, refinement: refinement)
+            let base = try requestContents(original, provider: provider)
+            let refined = try requestContents(request, provider: provider)
+            XCTAssertEqual(request.url, original.url)
+            XCTAssertEqual(request.allHTTPHeaderFields, original.allHTTPHeaderFields)
+            XCTAssertEqual(refined.fields["instruction"] as? String, base.fields["instruction"] as? String)
+            XCTAssertEqual(refined.fields["text_before"] as? String, base.fields["text_before"] as? String)
+            XCTAssertEqual(refined.fields["text_after"] as? String, base.fields["text_after"] as? String)
+            XCTAssertEqual(refined.fields["previous_suggestions"] as? [String], refinement.previousSuggestions)
+            XCTAssertEqual(refined.fields["feedback"] as? [String], refinement.feedback)
+            XCTAssertTrue(refined.system.hasPrefix(base.system), "Keep the existing replacement contract")
+            XCTAssertTrue(refined.system.contains("latest relevant feedback wins"))
+            XCTAssertTrue(refined.system.contains("exactly three distinct revised alternatives"))
+            XCTAssertNil(refined.body["previous_response_id"])
+            XCTAssertNil(refined.body["conversation"])
+            XCTAssertFalse(String(decoding: request.httpBody!, as: UTF8.self).contains("test-key"))
+            switch provider {
+            case .openAI:
+                XCTAssertEqual(refined.body["store"] as? Bool, false)
+                XCTAssertEqual(refined.body["text"] as? NSDictionary, base.body["text"] as? NSDictionary)
+                XCTAssertEqual(refined.body["max_output_tokens"] as? Int, base.body["max_output_tokens"] as? Int)
+            case .anthropic:
+                XCTAssertEqual((refined.body["messages"] as? [[String: String]])?.count, 1)
+                XCTAssertEqual(refined.body["max_tokens"] as? Int, base.body["max_tokens"] as? Int)
+            case .custom:
+                XCTAssertEqual((refined.body["messages"] as? [[String: String]])?.count, 2)
+                XCTAssertEqual(refined.body["max_tokens"] as? Int, base.body["max_tokens"] as? Int)
+            }
+        }
+    }
+
+    func testNilRefinementPreservesInitialPromptAndProviderPayloads() throws {
+        for provider in LLMProvider.allCases {
+            let configuration = LLMConfiguration(provider: provider, model: "test-model", apiKey: "test-key")
+            let client = CompletionClient()
+            let implicit = try client.makeRequest(for: template, in: text, configuration: configuration)
+            let explicit = try client.makeRequest(for: template, in: text, configuration: configuration, refinement: nil)
+            let base = try requestContents(implicit, provider: provider)
+            let nilRequest = try requestContents(explicit, provider: provider)
+            XCTAssertEqual(base.body as NSDictionary, nilRequest.body as NSDictionary)
+            XCTAssertEqual(base.fields as NSDictionary, [
+                "instruction": "a warm welcome", "text_before": "Hello ", "text_after": " and thanks."
+            ] as NSDictionary)
+            XCTAssertFalse(base.system.contains("refinement"))
+        }
+    }
+
+    func testRefinementKeepsOriginalTargetWhenOtherIdenticalPlaceholdersExist() throws {
+        let text = "😀 Friend: {a greeting}\nClient: {a greeting}"
+        let position = (text as NSString).range(of: "{a greeting}", options: .backwards).location
+        let target = try XCTUnwrap(BraceTemplate.find(in: text, selection: NSRange(location: position + 2, length: 0)))
+        let refinement = try SuggestionRefinement(previousSuggestions: ["Hi", "Hello", "Welcome"],
+            feedback: ["Include \"thanks\".\nKeep {literal braces} if useful."])
+        let request = try CompletionClient().makeRequest(for: target, in: text,
+            configuration: LLMConfiguration(provider: .openAI, apiKey: "test-key"), refinement: refinement)
+        let contents = try requestContents(request, provider: .openAI)
+        XCTAssertEqual(contents.fields["text_before"] as? String, "😀 Friend: {a greeting}\nClient: ")
+        XCTAssertEqual(contents.fields["text_after"] as? String, "")
+        XCTAssertEqual(contents.fields["instruction"] as? String, "a greeting")
+        XCTAssertEqual(contents.fields["feedback"] as? [String], refinement.feedback)
+        XCTAssertThrowsError(try CompletionClient().makeRequest(for: target, in: "Changed field",
+            configuration: LLMConfiguration(provider: .openAI, apiKey: "test-key"), refinement: refinement)) {
+            XCTAssertEqual($0 as? CompletionError, .invalidTemplate)
+        }
+    }
+
     func testOpenAIRequestUsesStrictSchemaAndDisablesStorage() throws {
         let request = try CompletionClient().makeRequest(for: template, in: text, configuration: LLMConfiguration(provider: .openAI, apiKey: "test-key"))
         XCTAssertEqual(request.url?.absoluteString, "https://api.openai.com/v1/responses")
@@ -196,6 +269,23 @@ final class CompletionClientTests: XCTestCase {
             prompt = try XCTUnwrap((body["messages"] as? [[String: String]])?.last?["content"])
         }
         return try XCTUnwrap(JSONSerialization.jsonObject(with: Data(prompt.utf8)) as? [String: String])
+    }
+
+    private func requestContents(_ request: URLRequest, provider: LLMProvider) throws
+        -> (body: [String: Any], fields: [String: Any], system: String) {
+        let body = try XCTUnwrap(JSONSerialization.jsonObject(with: XCTUnwrap(request.httpBody)) as? [String: Any])
+        let prompt: String
+        let system: String
+        if provider == .openAI {
+            prompt = try XCTUnwrap(body["input"] as? String)
+            system = try XCTUnwrap(body["instructions"] as? String)
+        } else {
+            let messages = try XCTUnwrap(body["messages"] as? [[String: String]])
+            prompt = try XCTUnwrap(messages.last?["content"])
+            system = try XCTUnwrap(provider == .anthropic ? body["system"] as? String : messages.first?["content"])
+        }
+        let fields = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(prompt.utf8)) as? [String: Any])
+        return (body, fields, system)
     }
 
     private func response(_ json: String, provider: LLMProvider) -> Data {
