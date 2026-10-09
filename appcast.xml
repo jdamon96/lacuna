@@ -7,6 +7,20 @@ IMPORTANT: This file was signed by Sparkle. Any modifications to this file requi
     <description>Updates for Lacuna for macOS.</description>
     <language>en</language>
     <item>
+      <title>Lacuna 0.5.0</title>
+      <link>https://github.com/jdamon96/lacuna/releases/tag/v0.5.0</link>
+      <sparkle:version>9</sparkle:version>
+      <sparkle:shortVersionString>0.5.0</sparkle:shortVersionString>
+      <sparkle:minimumSystemVersion>13.0.0</sparkle:minimumSystemVersion>
+      <pubDate>Fri, 09 Oct 2026 19:19:49 +0000</pubDate>
+      <description sparkle:format="plain-text">Refine suggestions without leaving the keyboard.
+
+Press Right Arrow while suggestions are open, type feedback such as “make it more casual and concise,” and press Return for three revised options. Repeat as needed, then choose 1, 2, or 3 to insert.
+
+Escape returns to the previous options, including while a revision is loading. Failed requests preserve your choices and feedback draft. Reopening an unchanged phrase restores its latest suggestions and refinement history.</description>
+      <enclosure url="https://github.com/jdamon96/lacuna/releases/download/v0.5.0/Lacuna-0.5.0-universal.zip" sparkle:edSignature="5FTEuBPta9PV1Kv+mrGOdfRSLNVQvgwsXNOsWsT8K5PvpvThwiem2VbttWQulUHvuQLEt+GCXvKAtZzOPYeCDA==" length="2155999" type="application/octet-stream"></enclosure>
+    </item>
+    <item>
       <title>Lacuna 0.4.1</title>
       <link>https://github.com/jdamon96/lacuna/releases/tag/v0.4.1</link>
       <sparkle:version>8</sparkle:version>
@@ -64,6 +78,6 @@ This is the first version with an updater. Versions 0.2.x need one manual instal
     </item>
   </channel>
 </rss><!-- sparkle-signatures:
-edSignature: 1cRcW88A8xPJM9fSzEItHSZ6QMOj8UDtefcg0L8KDo+mYftdu2jfvrMF6kQlmOYCeSEcEgaPMISDBBda/hEFBw==
-length: 5739
+edSignature: HGYMtcAwjLrPq9QJg+GIdYc7Ql+dCvHT3Q+zCLaJDzfI6KvH650+lqjXL44A9Dz+BWgcs2F/frCBXLfcWhtYAg==
+length: 6934
 -->
