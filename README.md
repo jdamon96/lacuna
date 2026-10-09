@@ -2,6 +2,10 @@
 
 Fill the gaps in your writing. Lacuna is an open source macOS menu bar app that turns `{instructions}` into three inline suggestions, wherever compatible text fields are available.
 
+![Lacuna demo: type a request in braces, press Shift-Command-K, and press 2 to insert a suggestion.](docs/assets/lacuna-demo.gif)
+
+*Example workflow using Lacuna’s native UI and sample suggestions.*
+
 ## Requirements
 
 macOS 13 or later, Apple Silicon or Intel, and an OpenAI or Anthropic API key (or an OpenAI-compatible server).
